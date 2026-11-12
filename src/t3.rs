@@ -240,6 +240,27 @@ pub fn send(address: &str, text: &str) -> Result<(), String> {
     }
 }
 
+/// The thread's latest messages as turns to read, oldest first.
+pub fn conversation(address: &str) -> Result<Vec<crate::claude::Turn>, String> {
+    use crate::claude::{Turn, Who};
+    let v = call(&["thread", "show", address, "--json", "--messages", "60"])?;
+    let turns = v["messages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|m| {
+            let who = match m["role"].as_str()? {
+                "user" => Who::You,
+                "assistant" => Who::Claude,
+                _ => return None,
+            };
+            let text = m["text"].as_str()?.trim();
+            (!text.is_empty()).then(|| Turn { who, text: text.to_string(), at: 0, times: 1, agent: None })
+        })
+        .collect();
+    Ok(turns)
+}
+
 /// T3's CLI has no stop yet.
 pub fn interrupt(_address: &str) -> Result<bool, String> {
     Err("T3's CLI can't stop a thread yet: stop it in T3".into())

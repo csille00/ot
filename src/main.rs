@@ -120,6 +120,11 @@ enum Msg {
     },
     /// How something asked of one of hc's agents went, for the note.
     Asked(String),
+    /// A T3 thread's messages, read to show it, or why they couldn't be.
+    Thread {
+        id: String,
+        turns: Result<Vec<claude::Turn>, String>,
+    },
     /// Haiku's line on where an agent that stopped stands, or why not.
     Brief {
         worker: model::Worker,
@@ -155,6 +160,12 @@ enum Shown {
         view: sessionui::View,
     },
     Music(musicui::View),
+    /// A T3 thread with no session of Claude's here to read, read through T3.
+    Thread {
+        agent: hc::Agent,
+        turns: Vec<claude::Turn>,
+        view: sessionui::View,
+    },
 }
 
 /// What a key asks of the loop, beyond changing the app.
@@ -393,7 +404,16 @@ impl App {
                 musicui::Search::Hits { .. } => Some(("hits", vec![keys::Place::Hits])),
                 _ => Some(("music", vec![keys::Place::Music])),
             },
-            Shown::Session { .. } => Some(("session", vec![keys::Place::Transcript])),
+            Shown::Session { .. } | Shown::Thread { .. } => {
+                if matches!(self.view.mode, Mode::Tell { .. }) {
+                    return None;
+                }
+                let mut at = vec![keys::Place::Transcript];
+                if self.reply_to().is_some() {
+                    at.push(keys::Place::Reply);
+                }
+                Some(("session", at))
+            }
             Shown::Board => matches!(self.view.mode, Mode::Board).then(|| ("board", self.view.places(&self.snap, &self.board))),
         }
     }
@@ -928,6 +948,30 @@ impl App {
         }
     }
 
+    /// The T3 thread what is being read takes a reply in: the one shown, or
+    /// the one whose claude the session shown is.
+    fn reply_to(&self) -> Option<hc::Agent> {
+        match &self.shown {
+            Shown::Thread { agent, .. } => Some(agent.clone()),
+            Shown::Session { id, agent: None, .. } => {
+                let s = self.sessions.iter().find(|s| s.id == *id)?;
+                self.agents.iter().find(|a| t3::owns(&a.address) && a.pid.is_some() && a.pid == s.pid).cloned()
+            }
+            _ => None,
+        }
+    }
+
+    /// Reads the thread shown again, off the UI thread.
+    fn load_thread(&self) {
+        if let Shown::Thread { agent, .. } = &self.shown {
+            let (tx, id) = (self.tx.clone(), agent.address.clone());
+            std::thread::spawn(move || {
+                let turns = t3::conversation(&id);
+                tx.send(Msg::Thread { id, turns })
+            });
+        }
+    }
+
     fn picked_agent(&self) -> Option<&hc::Agent> {
         let address = match self.view.item(&self.board)? {
             model::Item::Hc { address, .. } => address,
@@ -1059,8 +1103,27 @@ fn run(
                 Msg::Fetched(answer) => app.on_fetched(answer),
                 Msg::Claude(sessions) => app.on_sessions(sessions),
                 Msg::Hc(agents) => {
+                    if let Shown::Thread { agent, .. } = &mut app.shown {
+                        if let Some(now) = agents.iter().find(|a| a.address == agent.address) {
+                            let moved = now.at != agent.at || now.status != agent.status;
+                            *agent = now.clone();
+                            if moved {
+                                app.load_thread();
+                            }
+                        }
+                    }
                     app.agents = agents;
                     app.rebuild();
+                }
+                Msg::Thread { id, turns } => {
+                    if let Shown::Thread { agent, turns: shown, .. } = &mut app.shown {
+                        if agent.address == id {
+                            match turns {
+                                Ok(t) => *shown = t,
+                                Err(e) => app.note = Some(format!("can't read {}: {e}", agent.name)),
+                            }
+                        }
+                    }
                 }
                 Msg::Found { query, hits } => app.on_found(&query, hits),
                 Msg::Played { url, result } => app.on_played(&url, result),
@@ -1073,7 +1136,10 @@ fn run(
                 Msg::Pushed { iid, past, result } => app.on_pushed(iid, past, result),
                 Msg::Judged { read, result } => app.on_judged(read, result),
                 Msg::Brief { worker, result } => app.on_brief(worker, result),
-                Msg::Asked(how) => app.note = Some(how),
+                Msg::Asked(how) => {
+                    app.note = Some(how);
+                    app.load_thread();
+                }
                 Msg::Described { iid, result } => app.on_described(iid, result),
                 Msg::Slack(Ok(emails)) => app.slack = emails,
                 Msg::Slack(Err(e)) => app.note = Some(format!("c can't complete from Slack: {e}")),
@@ -1095,10 +1161,10 @@ fn run(
                         Next::Stay => {}
                         Next::Quit => return Ok(()),
                         Next::Review(open) => review_in_nvim(term, &lend, app, open),
-                        Next::Attach(agent) if t3::owns(&agent.address) => match t3::link(&agent.address) {
-                            Some(link) => app.note = Some(term::open(&link).unwrap_or_else(|| format!("opened {} in T3", agent.name))),
-                            None => app.note = Some(format!("no T3 link for {}", agent.name)),
-                        },
+                        Next::Attach(agent) if t3::owns(&agent.address) => {
+                            app.shown = Shown::Thread { agent, turns: vec![], view: sessionui::View::at_end() };
+                            app.load_thread();
+                        }
                         Next::Attach(agent) => match lend_terminal(term, &lend, hc::attach(&agent.address)) {
                             Ok(left) if left.success() => {}
                             Ok(_) => app.note = Some(format!("hc couldn't attach to {}", agent.name)),
@@ -1153,7 +1219,7 @@ fn key(app: &mut App, name: &str) -> Next {
     };
     match &app.shown {
         Shown::Music(_) => music_act(app, act),
-        Shown::Session { .. } => session_act(app, act),
+        Shown::Session { .. } | Shown::Thread { .. } => session_act(app, act),
         Shown::Board => return board_act(app, act),
     }
     Next::Stay
@@ -1241,7 +1307,22 @@ fn music_act(app: &mut App, act: Act) {
 
 /// The keys of a session being read.
 fn session_act(app: &mut App, act: Act) {
-    let Shown::Session { view, .. } = &mut app.shown else { return };
+    match act {
+        Act::Tell => {
+            if let Some(to) = app.reply_to() {
+                app.view.mode = Mode::Tell { to, text: String::new() };
+            }
+            return;
+        }
+        Act::Web => {
+            if let Some(link) = app.reply_to().and_then(|a| t3::link(&a.address)) {
+                app.note = term::open(&link);
+            }
+            return;
+        }
+        _ => {}
+    }
+    let (Shown::Session { view, .. } | Shown::Thread { view, .. }) = &mut app.shown else { return };
     match act {
         Act::Down => view.step(1),
         Act::Up => view.step(-1),
@@ -1635,6 +1716,32 @@ fn volume(by: i32) {
     );
 }
 
+/// The places the screen's keys come from, or what the reply box leaves showing.
+fn places_now(places: &Option<(&'static str, Vec<keys::Place>)>) -> Vec<keys::Place> {
+    places.as_ref().map_or(vec![keys::Place::Transcript], |(_, p)| p.clone())
+}
+
+/// How a T3 thread stands, in a word.
+fn hc_word(s: hc::Status) -> &'static str {
+    match s {
+        hc::Status::Working => "working",
+        hc::Status::Blocked => "waiting on you",
+        hc::Status::Stopped => "done",
+    }
+}
+
+/// The box a reply is typed in, over a conversation being read.
+fn reply_box(f: &mut ratatui::Frame, tell: Option<&(String, String)>) {
+    let Some((name, text)) = tell else { return };
+    ui::ask(f, |w| {
+        let mut lines = vec![ratatui::text::Line::styled(format!("reply to {name}:"), ui::fg(ui::DIM))];
+        lines.extend(ui::typed(text, w));
+        lines.push(ratatui::text::Line::default());
+        lines.push(ui::keys(&[("enter", " sends  "), ("esc", " drops")]));
+        lines
+    });
+}
+
 /// A command run for its effect, fed `input`, with nobody waiting on it.
 fn off_thread(cmd: &str, args: &[&str], input: String) {
     let (cmd, args): (String, Vec<String>) =
@@ -1686,6 +1793,11 @@ fn draw(term: &mut ratatui::DefaultTerminal, app: &mut App) -> std::io::Result<(
             })
             .map(|_| ());
     }
+    let tell = match &app.view.mode {
+        Mode::Tell { to, text } => Some((to.name.clone(), text.clone())),
+        _ => None,
+    };
+    let places = places_now(&app.places());
     if let Shown::Session { id, agent, view } = &mut app.shown {
         // on_sessions keeps the one shown on the board, and a session's
         // agents stay in it.
@@ -1695,7 +1807,27 @@ fn draw(term: &mut ratatui::DefaultTerminal, app: &mut App) -> std::io::Result<(
             Some(name) => sessionui::Transcript::agent(s, name, now).unwrap(),
             None => sessionui::Transcript::session(s, now),
         };
-        return term.draw(|f| sessionui::draw(f, &t, now, view)).map(|_| ());
+        let note = app.note.as_deref();
+        return term.draw(|f| {
+            sessionui::draw(f, &t, now, view, &places, note);
+            reply_box(f, tell.as_ref());
+        })
+        .map(|_| ());
+    }
+    if let Shown::Thread { .. } = &app.shown {
+        let now = jiff::Timestamp::now().as_second();
+        let Shown::Thread { agent, turns, view } = &mut app.shown else { unreachable!() };
+        let mut facts = vec![hc_word(agent.status).to_string(), model::ago(now - agent.at), "t3".to_string()];
+        if turns.is_empty() {
+            facts.insert(0, "reading…".to_string());
+        }
+        let t = sessionui::Transcript { title: agent.name.clone(), facts, turns, voices: ["you", "claude"] };
+        let note = app.note.as_deref();
+        return term.draw(|f| {
+            sessionui::draw(f, &t, now, view, &places, note);
+            reply_box(f, tell.as_ref());
+        })
+        .map(|_| ());
     }
     let stamp = app.stamp();
     let people = match &app.view.mode {

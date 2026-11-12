@@ -122,6 +122,8 @@ pub enum Place {
     HcWorking,
     /// In one, reading it.
     Transcript,
+    /// Reading a T3 thread, which takes a reply.
+    Reply,
     /// On the music screen.
     Music,
     /// On a search's results there.
@@ -214,7 +216,7 @@ pub const KEYS: &[Key] = &[
     k("<leader>mp", "", "back to the tour, at the step you came from", &[Code], Act::PrevStep),
     k("enter", "read", "read the session", &[Session], Act::Read),
     k("t", "agent", "read what Claude, at work on it, says and does", &[Agent], Act::Agent),
-    k("enter", "attach", "take over the agent's terminal; ctrl+\\ there comes back", &[HcAlone], Act::Attach),
+    k("enter", "open", "read a T3 thread here, or take over an hc agent's terminal (ctrl+\\ there comes back)", &[HcAlone], Act::Attach),
     k("a", "attach", "the same on a session hc runs, where enter reads it", &[HcSession], Act::Attach),
     k("s", "tell", "type something to the agent; enter sends it, once nobody is typing there", &[Hc], Act::Tell),
     k("x", "stop", "press the agent's stop key, once you say y", &[HcWorking], Act::Stop),
@@ -237,6 +239,8 @@ pub const KEYS: &[Key] = &[
         &[Transcript],
         Act::Bottom,
     ),
+    k("s", "reply", "reply to the thread in T3; enter sends it, and a busy thread gets it next", &[Reply], Act::Tell),
+    k("w", "T3", "open the thread in T3, or copy its link over ssh", &[Reply], Act::Web),
     k("q", "back", "back to the board", &[Transcript], Act::Leave),
     k(
         "M",
