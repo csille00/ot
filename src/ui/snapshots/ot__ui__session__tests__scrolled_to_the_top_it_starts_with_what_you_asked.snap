@@ -1,0 +1,16 @@
+---
+source: src/ui/session.rs
+expression: "frame(80, 12, |v| v.top())"
+---
+ ot  Why the parser's error paths read         waiting on you  ·  25m  ·  $0.40
+     better apart
+
+  you      Split the parser's error paths from its happy path. Each should   3h
+           read alone, and the tests should not care which is which.
+           · reading src/parser.rs
+           · searching for ParseError
+
+  claude   Three error paths share one match arm with the happy path. I'll   2h
+           move them to errors.rs first.
+
+  G end  q back

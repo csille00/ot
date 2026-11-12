@@ -1,0 +1,28 @@
+---
+source: src/ui/board.rs
+expression: "frame(80, 24, |b, v| { v.bottom(b); v.fold_open = true; v.bottom(b); })"
+---
+ ot  team/app                                                       as of 13:44
+
+    ├─ ◐ lands-itself                                    merges itself     !109
+    │
+    ├─ ● alex/route-table                                review it         !201
+    ├─ ✓ kim/flag-cleanup                                you approved      !202
+    │  └─ ● kim/flag-cleanup-two                         review it         !203
+    │
+    └─ ◆ sam/scratch                                     you are here
+
+   claude
+    ◐ A fresh board                                      working             1m
+    ○ Why the parser's error paths read better apart     waiting on you     25m
+
+    ▾ 3 not sent
+    ├─ ● old-idea                                        ask for review    !110
+    │  └─ ● old-idea-two                                 ask for review    !111
+  ▌ └─ ● forgotten                                       ask for review    !112
+ ──────────────────────────────────────────────────────────────────────────────
+  Change 112                                                               !112
+  ● ask for review  ·  pipeline passed  ·  nobody asked to review
+  +12 −3 in 2 files
+ ──────────────────────────────────────────────────────────────────────────────
+  enter open  a reviewers  y link  w web  T tour  m merge  b rebase      ? keys

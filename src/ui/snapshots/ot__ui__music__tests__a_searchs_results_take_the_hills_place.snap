@@ -1,0 +1,18 @@
+---
+source: src/ui/music.rs
+expression: "crate::ui::text(&t)"
+---
+  ♪ music                                   nothing playing
+
+  cliamp is not running
+
+     6:04:42  set 6: beats to relax and study  Lofi Girl
+              to, the long one
+     7:04:42  set 7: beats to relax and study  Lofi Girl
+              to, the long one
+  ▌  8:04:42  set 8: beats to relax and study  Lofi Girl
+  ▌           to, the long one
+
+
+
+  enter play  a play next  esc back

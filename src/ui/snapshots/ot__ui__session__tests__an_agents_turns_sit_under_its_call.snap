@@ -1,0 +1,18 @@
+---
+source: src/ui/session.rs
+expression: "frame_of(0, 80, 14, |_| {})"
+---
+ ot  A fresh board                                     working  ·  1m  ·  $1.25
+
+  you      make the board fresh                                              2h
+           · reading src/main.rs
+
+  claude   The fetcher waits on the UI thread. Moving it.                    1h
+           · editing src/main.rs
+           · an agent: Review the fetcher
+
+    asked    Review the diff for design complexity.                          3m
+             · reading src/main.rs
+
+    agent    The fetcher is fine. One note on the writer.                    1m
+  G end  q back

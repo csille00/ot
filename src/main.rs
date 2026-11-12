@@ -1,0 +1,2015 @@
+//! ot: your GitLab merge requests as a board you can trust to be current,
+//! and a review of one, by the symbols it changed, in nvim.
+//!
+//! The UI thread only draws and answers keys. GitLab and git run on other
+//! threads, and everything comes back to the UI as a message, so no key
+//! ever waits on either.
+mod ask;
+mod brief;
+mod cache;
+mod claude;
+mod config;
+mod git;
+mod gitlab;
+mod hc;
+mod judge;
+mod keys;
+mod land;
+mod linear;
+mod model;
+mod music;
+mod nvim;
+mod rebase;
+mod review;
+mod slack;
+mod tour;
+mod ui;
+mod worktree;
+mod write;
+
+use config::Config;
+use gitlab::Shared;
+use keys::Act;
+use model::{bang, Board, Snapshot};
+use ratatui::crossterm::event::{self, DisableBracketedPaste, DisableFocusChange, EnableBracketedPaste, EnableFocusChange, Event, KeyEventKind};
+use ratatui::crossterm::execute;
+use ratatui::crossterm::terminal::{enable_raw_mode, EnterAlternateScreen};
+use std::borrow::Cow;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::io::Write as _;
+use std::path::Path;
+use std::process::{Command, Stdio};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use ui::board::{self as boardui, Doing, Left, Mode, Pick, Sets, Typing};
+use ui::music as musicui;
+use ui::session as sessionui;
+use write::Writer;
+
+/// How often the board asks GitLab while it is open.
+const EVERY: Duration = Duration::from_secs(30);
+
+/// How often instead for SOON_FOR after a write of ot's own, while GitLab
+/// is still taking it in (a merge, a pipeline starting) on the row you are
+/// watching. A refresh is about four requests, so this is some 50 a minute
+/// of the 2,000 GitLab allows.
+const SOON: Duration = Duration::from_secs(5);
+const SOON_FOR: Duration = Duration::from_secs(60);
+
+/// What a row says while Claude reads it for its landing.
+const READING: &str = "Claude reading";
+
+enum Msg {
+    Term(Event),
+    Fetched(Result<Snapshot, String>),
+    /// Claude's sessions on this repo, whenever one of them changes.
+    Claude(Vec<claude::Session>),
+    /// hc's Claude Code agents, whenever one of them changes.
+    Hc(Vec<hc::Agent>),
+    /// What cliamp plays and its bands, FPS times a second while it plays.
+    Music(music::Frame),
+    /// What a search for `query` found.
+    Found {
+        query: String,
+        hits: Result<Vec<music::Hit>, String>,
+    },
+    /// A pick at `url` played, or why not.
+    Played {
+        url: String,
+        result: Result<(), String>,
+    },
+    /// A plan's writes to an MR are done, or failed.
+    Wrote {
+        iid: u64,
+        doing: &'static str,
+        result: Result<(), String>,
+    },
+    /// What a rebase being prepared is at: a word for the row, the whole
+    /// of it for the panel.
+    Step {
+        iid: u64,
+        word: &'static str,
+        detail: String,
+    },
+    /// A rebase is prepared, to ask about, or could not be.
+    Rebased {
+        iid: u64,
+        result: Result<rebase::Rebased, String>,
+    },
+    /// A rebase is pushed, with the branches it had to leave alone; or
+    /// GitLab took none of it. `past` is its bottom layer and the merged MR
+    /// whose commits that left out, if any (Rebased::past).
+    Pushed {
+        iid: u64,
+        past: Option<(u64, u64)>,
+        result: Result<Vec<String>, String>,
+    },
+    /// What Claude said of the landing's MRs it was reading, `read`, or why
+    /// it couldn't say.
+    Judged {
+        read: Vec<u64>,
+        result: Result<Vec<land::Verdict>, String>,
+    },
+    /// An MR's description, read for c, or why it couldn't be.
+    Described {
+        iid: u64,
+        result: Result<String, String>,
+    },
+    /// How something asked of one of hc's agents went, for the note.
+    Asked(String),
+    /// Haiku's line on where an agent that stopped stands, or why not.
+    Brief {
+        worker: model::Worker,
+        result: Result<String, String>,
+    },
+    /// Everyone in your Slack, by email, or why not.
+    Slack(Result<Vec<String>, String>),
+    /// Everyone in the GitLab project, by username, or why not.
+    Members(Result<Vec<String>, String>),
+    /// Your tickets, as Linear gave them after GitLab's answer, or why not.
+    Tickets(Result<Vec<model::Ticket>, String>),
+    /// The review checkout, looked at once nothing else was at it: how
+    /// `went` went, a push or putting aside for an MR, if one ran; the
+    /// change of yours it holds now, and the MR of yours it is on.
+    Checkout {
+        went: Option<(u64, Result<String, String>)>,
+        change: Option<worktree::Change>,
+        owner: Option<(u64, String)>,
+    },
+}
+
+/// Something done in the review checkout, given where it is, with a line
+/// on how it went.
+type Work = Box<dyn FnOnce(&Path) -> Result<String, String> + Send>;
+
+/// What the terminal shows: the board, one of Claude's sessions or the
+/// agent of one named `agent`, or the music.
+enum Shown {
+    Board,
+    Session {
+        id: String,
+        agent: Option<String>,
+        view: sessionui::View,
+    },
+    Music(musicui::View),
+}
+
+/// What a key asks of the loop, beyond changing the app.
+enum Next {
+    Stay,
+    Quit,
+    /// The terminal to nvim, for a review, until it quits.
+    Review(nvim::Open),
+    /// The terminal to one of hc's agents, until you detach.
+    Attach(hc::Agent),
+}
+
+/// A pick cliamp is loading, until it answers for that url.
+struct Load {
+    url: String,
+    title: String,
+}
+
+struct App {
+    cfg: Config,
+    gitlab: Shared,
+    writer: Arc<dyn Writer>,
+    server: nvim::Server,
+    tx: Sender<Msg>,
+    /// Each () asks the fetcher thread for a fresh snapshot.
+    fetches: Sender<()>,
+    /// When the board next asks GitLab on its own.
+    next_fetch: Instant,
+    /// A fetch is out.
+    fetching: bool,
+    /// A write landed while a fetch was already out: that fetch's answer
+    /// may be from before it, so one more is asked for.
+    fetch_again: bool,
+    /// When ot last wrote to GitLab, after which it asks more often (SOON).
+    wrote: Option<Instant>,
+    snap: Snapshot,
+    sessions: Vec<claude::Session>,
+    agents: Vec<hc::Agent>,
+    playing: Option<music::Playing>,
+    hills: ui::music::Hills,
+    /// How wide the last draw was, which the bars are laid out for.
+    width: usize,
+    /// Seconds of seeking asked for and not sent yet, and when to send
+    /// them: one seek, a moment after the last press, since each restarts
+    /// the stream.
+    seek: f64,
+    seek_due: Option<Instant>,
+    /// Where a seek is taking the track, from the press: the track it was
+    /// on, the clock it should land on and when it was asked, shown until
+    /// cliamp's clock gets there or a few seconds pass without it.
+    sought: Option<(i64, f64, Instant)>,
+    /// A pick on its way to cliamp, said on the music screen from the
+    /// press until cliamp answers.
+    loading: Option<Load>,
+    board: Board,
+    view: boardui::View,
+    shown: Shown,
+    error: Option<String>,
+    note: Option<String>,
+    /// What is being done to an MR, said on its row until GitLab's next
+    /// answer shows how it came out.
+    doing: HashMap<u64, Doing>,
+    /// Rebases ready to push, each waiting on its row for enter or b to
+    /// ask about it.
+    prepared: HashMap<u64, rebase::Rebased>,
+    /// Those done, waiting for that answer.
+    settling: HashSet<u64>,
+    /// The stacks you asked to land (land.rs), kept between runs.
+    landings: Vec<land::Landing>,
+    /// Who each MR was stacked on (model::remember), kept between runs.
+    was_on: HashMap<u64, u64>,
+    /// What Claude has been asked to read this run, by the heads of the
+    /// landing's MRs: once per version of a landing, so one it couldn't
+    /// read waits for each deploy until a push or ot's next start.
+    asked: HashSet<String>,
+    /// The rebases ot has started on its own this run (due), by MR and its
+    /// head then: once each, so one that fails or that you drop waits for a
+    /// push to it, or b, not for the next refresh.
+    tried: HashSet<(u64, String)>,
+    /// The merges ot has sent on its own this run (land::Step::Merge), by
+    /// MR and its head then: once each, so one GitLab refuses isn't sent
+    /// again on every refresh.
+    merges_sent: HashSet<(u64, String)>,
+    /// Reviews opened so far, which keeps each open's files apart.
+    reviews_opened: u64,
+    /// Everyone in your Slack, by email, once it has answered.
+    slack: Vec<String>,
+    /// Everyone in the GitLab project, by username, once it has answered.
+    members: Vec<String>,
+    /// Your tickets, as Linear last said, kept between runs.
+    tickets: Vec<model::Ticket>,
+    /// Haiku's line on each agent on the board that stopped.
+    briefs: brief::Briefs,
+    /// What each row waited on you for when ot last looked (tell).
+    told: BTreeMap<String, String>,
+    /// The terminal has focus, as far as it has said.
+    focused: bool,
+}
+
+impl App {
+    /// The board on what was cached, and the threads that keep it current:
+    /// the fetcher, asked by refresh(), and the server nvim's review talks to.
+    fn new(
+        cfg: Config,
+        snap: Snapshot,
+        gitlab: Shared,
+        writer: Arc<dyn Writer>,
+    ) -> (App, Receiver<Msg>) {
+        let (tx, rx) = mpsc::channel();
+        let fetches = fetcher(cfg.clone(), gitlab.clone(), tx.clone());
+        let landings = cache::landings(&cfg.project);
+        let was_on = model::remember(&cache::stacked(&cfg.project), &snap);
+        let tickets = cache::tickets(&cfg.project);
+        let server = nvim::Server::new(writer.clone(), gitlab.clone());
+        let mut app = App {
+            cfg,
+            gitlab,
+            writer,
+            server,
+            tx,
+            fetches,
+            next_fetch: Instant::now(),
+            fetching: false,
+            fetch_again: false,
+            wrote: None,
+            snap,
+            sessions: vec![],
+            agents: vec![],
+            playing: None,
+            hills: ui::music::Hills::default(),
+            width: 80,
+            seek: 0.0,
+            seek_due: None,
+            sought: None,
+            loading: None,
+            board: Board::default(),
+            view: boardui::View::default(),
+            shown: Shown::Board,
+            error: None,
+            note: None,
+            doing: HashMap::new(),
+            prepared: HashMap::new(),
+            settling: HashSet::new(),
+            landings,
+            was_on,
+            asked: HashSet::new(),
+            tried: HashSet::new(),
+            merges_sent: HashSet::new(),
+            reviews_opened: 0,
+            slack: vec![],
+            members: vec![],
+            tickets,
+            briefs: brief::Briefs::default(),
+            told: BTreeMap::new(),
+            focused: true,
+        };
+        app.rebuild();
+        app.view.top(&app.board);
+        (app, rx)
+    }
+
+    fn rebuild(&mut self) {
+        self.board = model::board(
+            &self.snap,
+            &self.cfg.rules,
+            &self.was_on,
+            &self.sessions,
+            &self.agents,
+            &self.tickets,
+            jiff::Timestamp::now().as_second(),
+        );
+        self.view.settle(&self.board);
+    }
+
+    /// Haiku reads each agent on the board that has stopped, off the UI
+    /// thread, for the panel's line on where its work stands. The loop
+    /// asks before each frame, never rebuild(), so tests start no Claude.
+    fn brief(&mut self) {
+        let run = cache::brief_dir(&self.cfg.project);
+        for (worker, log) in self.briefs.due(&self.board, &self.sessions) {
+            let (tx, run) = (self.tx.clone(), run.clone());
+            std::thread::spawn(move || {
+                let result = brief::read(&worker.name, &log, &run);
+                let _ = tx.send(Msg::Brief { worker, result });
+            });
+        }
+    }
+
+    /// Without Haiku's line, the panel says what the agent said, as before.
+    fn on_brief(&mut self, w: model::Worker, result: Result<String, String>) {
+        let said = result.unwrap_or_else(|e| {
+            self.note = Some(format!("Haiku couldn't read {}: {e}", w.name));
+            w.doing.clone()
+        });
+        self.briefs.heard(&w, said);
+    }
+
+    /// A notification for each row that has come to wait on you since the
+    /// last look, unless you are looking at ot. The loop asks before each
+    /// frame, never rebuild(), so tests notify nobody.
+    fn tell(&mut self) {
+        let landing = land::said(&self.landings, &self.snap, &self.cfg.rules);
+        let now = boardui::waits(&self.snap, &self.board, &self.doing, &landing);
+        let news: Vec<String> = now
+            .iter()
+            .filter(|(row, what)| self.told.get(*row) != Some(*what))
+            .map(|(row, what)| format!("{row}: {what}"))
+            .collect();
+        self.told = now;
+        if !news.is_empty() && !self.focused {
+            // The text goes as an argument, so nothing in it is read as script.
+            let script = ["-e", "on run argv", "-e", "display notification (item 1 of argv) with title \"ot\"", "-e", "end run"];
+            off_thread("osascript", &[&script[..], &[&news.join("\n")]].concat(), String::new());
+        }
+    }
+
+    /// The screen the next key goes to, as the key log names it, and the
+    /// places whose keys work there (keys.rs); None while a question or an
+    /// input has the keys.
+    fn places(&self) -> Option<(&'static str, Vec<keys::Place>)> {
+        match &self.shown {
+            Shown::Music(view) => match view.search {
+                musicui::Search::Typing(_) => None,
+                musicui::Search::Hits { .. } => Some(("hits", vec![keys::Place::Hits])),
+                _ => Some(("music", vec![keys::Place::Music])),
+            },
+            Shown::Session { .. } => Some(("session", vec![keys::Place::Transcript])),
+            Shown::Board => matches!(self.view.mode, Mode::Board).then(|| ("board", self.view.places(&self.snap, &self.board))),
+        }
+    }
+
+    /// How long until the board asks GitLab again on its own.
+    fn every(&self) -> Duration {
+        if self.wrote.is_some_and(|at| at.elapsed() < SOON_FOR) {
+            SOON
+        } else {
+            EVERY
+        }
+    }
+
+    /// A write to `iid` landed: its row says so until GitLab's next answer,
+    /// asked for now and often for a while.
+    fn written(&mut self, iid: u64) {
+        self.wrote = Some(Instant::now());
+        self.settling.insert(iid);
+        self.fetch_again |= self.fetching;
+        self.refresh();
+    }
+
+    /// Asks GitLab, unless a fetch is already out, and puts the next ask off.
+    fn refresh(&mut self) {
+        self.next_fetch = Instant::now() + self.every();
+        if !self.fetching {
+            self.fetching = self.fetches.send(()).is_ok();
+        }
+    }
+
+    fn on_fetched(&mut self, answer: Result<Snapshot, String>) {
+        self.fetching = false;
+        self.next_fetch = Instant::now() + self.every();
+        match answer {
+            Ok(snap) => {
+                self.snap = snap;
+                self.error = None;
+                let was_on = model::remember(&self.was_on, &self.snap);
+                if was_on != self.was_on {
+                    self.was_on = was_on;
+                    if let Err(e) = cache::save_stacked(&self.cfg.project, &self.was_on) {
+                        self.note = Some(e);
+                    }
+                }
+                let again = std::mem::take(&mut self.fetch_again);
+                if again {
+                    self.refresh();
+                } else {
+                    for iid in self.settling.drain() {
+                        self.doing.remove(&iid);
+                    }
+                }
+                self.rebuild();
+                // Only on an answer from after every write landed.
+                if !again {
+                    self.land();
+                }
+            }
+            Err(e) => self.error = Some(format!("{e}, trying again in {}s", self.every().as_secs())),
+        }
+    }
+
+    /// Seeks `by` seconds, with whatever else is asked within 400ms.
+    fn seek(&mut self, by: f64) {
+        self.seek += by;
+        self.seek_due = Some(Instant::now() + Duration::from_millis(400));
+        if let Some(p) = &self.playing {
+            let from = self.sought.map(|(_, at, _)| at).unwrap_or(p.position);
+            self.sought = Some((p.index, (from + by).max(0.0), Instant::now()));
+        }
+    }
+
+    /// The seek asked for, once its moment has come.
+    fn send_seek(&mut self) {
+        if self.seek_due.is_some_and(|due| Instant::now() >= due) {
+            let by = std::mem::take(&mut self.seek);
+            self.seek_due = None;
+            if by != 0.0 {
+                off_thread("cliamp", &["seek", &format!("{by}")], String::new());
+            }
+        }
+    }
+
+    /// A search came back: its hits to pick from, unless you have moved
+    /// on, or why there are none.
+    fn on_found(&mut self, query: &str, hits: Result<Vec<music::Hit>, String>) {
+        let Shown::Music(view) = &mut self.shown else {
+            return;
+        };
+        if !matches!(&view.search, musicui::Search::Searching(q) if q == query) {
+            return;
+        }
+        match hits {
+            Ok(hits) => view.search = musicui::Search::Hits { hits, at: 0 },
+            Err(e) => {
+                view.search = musicui::Search::Off;
+                view.said = Some(e);
+            }
+        }
+    }
+
+    /// cliamp answered a pick: the wait for it is over, and the music
+    /// screen says why when it was refused.
+    fn on_played(&mut self, url: &str, result: Result<(), String>) {
+        if self.loading.as_ref().is_some_and(|l| l.url == url) {
+            self.loading = None;
+        }
+        if let (Shown::Music(view), Err(e)) = (&mut self.shown, result) {
+            view.said = Some(e);
+        }
+    }
+
+    /// A frame of music: the bars move on by the time since the last.
+    fn on_music(&mut self, frame: music::Frame) {
+        self.playing = frame.playing;
+        // The seek has landed, the track moved on without it, or cliamp
+        // had its say (a seek past the end lands nowhere near).
+        if let (Some((index, at, asked)), Some(p)) = (self.sought, &self.playing) {
+            if p.index != index
+                || (p.position - at).abs() < 2.0
+                || asked.elapsed() > Duration::from_secs(5)
+            {
+                self.sought = None;
+            }
+        }
+        self.hills.tick(&frame.bands, self.width);
+    }
+
+    /// Claude's sessions changed. One being read that went off the board
+    /// (quiet too long) takes the screen back to the board.
+    fn on_sessions(&mut self, sessions: Vec<claude::Session>) {
+        self.sessions = sessions;
+        if let Shown::Session { id, .. } = &self.shown {
+            if !self.sessions.iter().any(|s| s.id == *id) {
+                self.shown = Shown::Board;
+            }
+        }
+        self.rebuild();
+    }
+
+    /// Linear answered. Without an answer the board keeps the tickets it
+    /// had, so a hiccup doesn't empty a project.
+    fn on_tickets(&mut self, answer: Result<Vec<model::Ticket>, String>) {
+        match answer {
+            Ok(tickets) if tickets != self.tickets => {
+                self.tickets = tickets;
+                if let Err(e) = cache::save_tickets(&self.cfg.project, &self.tickets) {
+                    self.note = Some(e);
+                }
+                self.rebuild();
+            }
+            Ok(_) => {}
+            Err(e) => self.note = Some(e),
+        }
+    }
+
+    fn on_wrote(&mut self, iid: u64, doing: &'static str, result: Result<(), String>) {
+        match result {
+            Ok(()) => self.written(iid),
+            Err(e) => {
+                self.doing.remove(&iid);
+                self.note = Some(format!("{doing} {} failed: {e}", bang(iid)));
+            }
+        }
+    }
+
+    /// On GitLab's fresh answer, ot readies each rebase that is due, once,
+    /// unless its MR already has one under way or waiting on you, and each
+    /// landing ends once it is done or can't go on. Its merges wait for you
+    /// (ask), but for one Claude said can go out with the one below, which
+    /// ot sends itself, once.
+    fn land(&mut self) {
+        let unread: Vec<Vec<model::Mr>> = self.landings.iter().filter_map(|l| l.to_read(&self.snap)).collect();
+        for layers in unread {
+            let heads: Vec<&str> = layers.iter().map(|m| m.head.as_str()).collect();
+            if self.asked.insert(heads.join(" ")) {
+                self.judge(layers);
+            }
+        }
+        for iid in self.due() {
+            let head = self.snap.mr(iid).map(|m| m.head.clone()).unwrap_or_default();
+            if !self.doing.contains_key(&iid) && self.tried.insert((iid, head)) {
+                self.rebase(iid);
+            }
+        }
+        let steps: Vec<land::Step> = self
+            .landings
+            .iter()
+            .map(|l| l.next(&self.snap, &self.cfg.rules))
+            .collect();
+        let mut ended = vec![];
+        for (i, step) in steps.into_iter().enumerate() {
+            match step {
+                land::Step::Done => ended.push((i, None)),
+                land::Step::Stop(why) => ended.push((i, Some(why))),
+                land::Step::Merge(iid) => {
+                    let plan = self.snap.mr(iid).and_then(|m| Some((m.head.clone(), model::plan(Act::Merge, m)?)));
+                    if let Some((head, plan)) = plan {
+                        if !self.doing.contains_key(&iid) && self.merges_sent.insert((iid, head)) {
+                            carry_out(self, iid, plan);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        for (i, why) in ended.into_iter().rev() {
+            let l = self.unland(i);
+            self.note = Some(match why {
+                None => format!("landed {}", l.names()),
+                Some(why) => format!("stopped landing {}: {why}", l.names()),
+            });
+        }
+    }
+
+    /// Claude reads a landing's MRs, off the UI thread, for which can go
+    /// out in the same deploy as the one below.
+    fn judge(&mut self, layers: Vec<model::Mr>) {
+        let Some(top) = layers.last().map(|m| m.iid) else {
+            return;
+        };
+        // Each it reads says so, unless something else is under way there.
+        let mut read = vec![];
+        for pair in layers.windows(2).filter(|p| p[1].reach.is_none()) {
+            let (b, m) = (pair[0].iid, pair[1].iid);
+            read.push(m);
+            self.doing.entry(m).or_insert(Doing {
+                word: READING.into(),
+                detail: format!("Claude is reading whether {} can go out in the same deploy as {}", bang(m), bang(b)),
+                on_you: false,
+            });
+        }
+        let (gitlab, tx) = (self.gitlab.clone(), self.tx.clone());
+        let (project, main) = (self.cfg.project.clone(), self.snap.default_branch.clone());
+        let run = cache::land_dir(&project).join(top.to_string());
+        std::thread::spawn(move || {
+            let result = gitlab
+                .get()
+                .and_then(|g| judge::together(Path::new("."), &g, &project, &main, &layers, &run));
+            let _ = tx.send(Msg::Judged { read, result });
+        });
+    }
+
+    /// Kept with its landing. Without it, each waits for the one below
+    /// to be live, as a landing does anyway.
+    fn on_judged(&mut self, read: Vec<u64>, result: Result<Vec<land::Verdict>, String>) {
+        for i in &read {
+            if self.doing.get(i).is_some_and(|d| d.word == READING) {
+                self.doing.remove(i);
+            }
+        }
+        let names: Vec<String> = read.iter().map(|&i| bang(i)).collect();
+        match (result, read.first().and_then(|&i| self.landing_of(i))) {
+            (Ok(verdicts), Some(i)) => {
+                self.landings[i].judged(&self.snap, verdicts);
+                self.keep_landings();
+            }
+            (Ok(_), None) => {}
+            (Err(e), _) => {
+                self.note = Some(format!("Claude couldn't read {}, so each waits for the one below to be live: {e}", names.join(", ")))
+            }
+        }
+    }
+
+    /// The landing `iid` is in, by its place.
+    fn landing_of(&self, iid: u64) -> Option<usize> {
+        self.landings.iter().position(|l| l.iids.contains(&iid))
+    }
+
+    /// The landing whose next step is to rebase `iid`, which can't go on
+    /// past a rebase of it that failed or that you dropped.
+    fn rebasing(&self, iid: u64) -> Option<usize> {
+        let step = land::Step::Rebase(iid);
+        self.landings.iter().position(|l| l.next(&self.snap, &self.cfg.rules) == step)
+    }
+
+    /// The landing at `i`, no longer landed.
+    fn unland(&mut self, i: usize) -> land::Landing {
+        let l = self.landings.remove(i);
+        self.keep_landings();
+        l
+    }
+
+    /// The rebases ot does without being asked: what a landing's next step
+    /// is to rebase, then each MR of yours still with the commits of a
+    /// merged one it sat on (Mr::carries), however that merged.
+    fn due(&self) -> Vec<u64> {
+        let mut all = vec![];
+        for l in &self.landings {
+            if let land::Step::Rebase(iid) = l.next(&self.snap, &self.cfg.rules) {
+                all.push(iid);
+            }
+        }
+        for m in self.snap.mrs.iter().filter(|m| m.reach.is_none() && m.carries.is_some()) {
+            if !all.contains(&m.iid) {
+                all.push(m.iid);
+            }
+        }
+        all
+    }
+
+    /// A rebase is in place whose bottom layer left out the commits of the
+    /// merged MR it sat on (Rebased::past).
+    fn rebased(&mut self, past: Option<(u64, u64)>) {
+        if let Some((iid, merged)) = past {
+            for l in &mut self.landings {
+                l.rebased(iid, merged);
+            }
+            self.keep_landings();
+        }
+    }
+
+    fn keep_landings(&mut self) {
+        if let Err(e) = cache::save_landings(&self.cfg.project, &self.landings) {
+            self.note = Some(e);
+        }
+    }
+
+    /// b: the MR's stack rebased here, off the UI thread, its row saying
+    /// what that is at; what it will do comes back to ask about. Past the
+    /// MR it sat on, if that merged, however it did (model::layers).
+    fn rebase(&mut self, iid: u64) {
+        let (layers, below) = model::layers(&self.snap, &self.was_on, iid);
+        if layers.is_empty() {
+            self.note = Some(format!("{} merged, so there is nothing of it to rebase; b on what was on it rebases that past it", bang(iid)));
+            return;
+        }
+        let layers: Vec<model::Mr> = layers.into_iter().cloned().collect();
+        let at = cache::settle_dir(&self.cfg.project);
+        self.doing.insert(iid, Doing::word("rebasing"));
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let mut step = |word: &'static str, detail: &str| {
+                let _ = tx.send(Msg::Step { iid, word, detail: detail.into() });
+            };
+            let result = rebase::prepare(Path::new("."), &layers, below, &at, &mut step);
+            let _ = tx.send(Msg::Rebased { iid, result });
+        });
+    }
+
+    /// Ready to ask, it never interrupts: the row says so, and enter or b
+    /// there asks. One that is due goes on its own when it is only git's
+    /// replay of your branches; you see first one where Claude settled
+    /// conflicts, that pushes commits of yours GitLab hasn't seen, or that
+    /// moves someone else's branch.
+    fn on_rebased(&mut self, iid: u64, result: Result<rebase::Rebased, String>) {
+        self.doing.remove(&iid);
+        match result {
+            Err(e) => {
+                self.note = Some(match self.rebasing(iid) {
+                    Some(i) => format!("stopped landing {}: {e}", self.unland(i).names()),
+                    None => e,
+                })
+            }
+            Ok(r) if !r.moves() => {
+                self.rebased(r.past());
+                self.note = Some(r.said.iter().map(|s| s.text.as_str()).collect::<Vec<_>>().join(" "))
+            }
+            Ok(ready) => {
+                let yours = |l: &rebase::Layer| l.new == l.remote || self.snap.mr(l.iid).is_some_and(|m| m.author == self.snap.me);
+                if self.due().contains(&iid) && ready.plain() && ready.layers.iter().all(yours) {
+                    self.push(iid, ready)
+                } else {
+                    self.park(iid, ready)
+                }
+            }
+        }
+    }
+
+    /// Asks about the MR's ready rebase, if it has one.
+    fn ask(&mut self, iid: u64) -> bool {
+        let Some(ready) = self.prepared.remove(&iid) else {
+            return false;
+        };
+        self.doing.remove(&iid);
+        self.view.mode = Mode::Rebase { iid, ready };
+        true
+    }
+
+    /// Asks to merge the MR, if its landing says it is ready, or it is one
+    /// ot merges itself, whose merge GitLab may have refused.
+    fn ask_landing(&mut self, iid: u64) -> bool {
+        let ready = self.landing_of(iid).is_some_and(|i| {
+            let step = self.landings[i].next(&self.snap, &self.cfg.rules);
+            step == land::Step::Ready(iid) || step == land::Step::Merge(iid)
+        });
+        let Some(plan) = self.snap.mr(iid).and_then(|m| model::plan(Act::Merge, m)).filter(|_| ready) else {
+            return false;
+        };
+        self.view.mode = Mode::Confirm { iid, plan };
+        true
+    }
+
+    fn park(&mut self, iid: u64, ready: rebase::Rebased) {
+        self.prepared.insert(iid, ready);
+        self.doing.insert(
+            iid,
+            Doing {
+                word: "rebase ready".into(),
+                detail: "the rebase is ready to push: enter or b shows what it will do and asks".into(),
+                on_you: true,
+            },
+        );
+    }
+
+    /// y on a prepared rebase: pushed, the local branches following.
+    fn push(&mut self, iid: u64, ready: rebase::Rebased) {
+        self.doing.insert(iid, Doing::word("pushing"));
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let mut step = |word: &'static str, detail: &str| {
+                let _ = tx.send(Msg::Step { iid, word, detail: detail.into() });
+            };
+            let result = rebase::push(Path::new("."), &ready, &mut step);
+            let _ = tx.send(Msg::Pushed { iid, past: ready.past(), result });
+        });
+    }
+
+    /// The input of who an MR's description cc's opens on who it does,
+    /// unless you have gone into something else meanwhile.
+    fn on_described(&mut self, iid: u64, result: Result<String, String>) {
+        match result {
+            Ok(description) => {
+                if matches!((&self.shown, &self.view.mode), (Shown::Board, Mode::Board)) {
+                    let ccs = model::ccs(&description);
+                    let text = if ccs.is_empty() { String::new() } else { format!("{} ", ccs.join(" ")) };
+                    let sets = Sets::Cc { description };
+                    self.view.mode = Mode::Typing(Typing { iid, text, cycling: None, sets });
+                }
+            }
+            Err(e) => self.note = Some(format!("reading {}'s description failed: {e}", bang(iid))),
+        }
+    }
+
+    /// The review checkout, off this thread and once nothing else is at it
+    /// (a push nvim started, still going), after `work` runs there for an
+    /// MR, its row saying `doing` meanwhile; what of yours it holds then
+    /// comes back to on_checkout.
+    fn checkout(&mut self, work: Option<(u64, &'static str, Work)>) {
+        if let Some((iid, doing, _)) = &work {
+            self.doing.insert(*iid, Doing::word(doing));
+        }
+        // Yours, by the head GitLab last said, or the one ot last pushed
+        // or fetched for it, which a board not refreshed yet hasn't seen.
+        let mine: Vec<(u64, String, String)> = self.snap.mrs.iter().filter(|m| m.author == self.snap.me).map(|m| (m.iid, m.source.clone(), m.head.clone())).collect();
+        let (tx, tree) = (self.tx.clone(), cache::review_tree(&self.cfg.project));
+        std::thread::spawn(move || {
+            let _one = worktree::CHECKOUT.lock().unwrap_or_else(|e| e.into_inner());
+            let went = work.map(|(iid, _, w)| (iid, w(&tree)));
+            let change = worktree::change(&tree);
+            let owner = change.as_ref().and_then(|c| {
+                let on = |(_, branch, head): &&(u64, String, String)| *head == c.on || git::rev(&tree, &format!("refs/remotes/origin/{branch}")).as_ref() == Some(&c.on);
+                mine.iter().find(on).map(|(iid, branch, _)| (*iid, branch.clone()))
+            });
+            let _ = tx.send(Msg::Checkout { went, change, owner });
+        });
+    }
+
+    /// Your change in the review checkout asked about on the board, with
+    /// why the last try didn't go; or said, while the board is busy.
+    fn on_checkout(&mut self, went: Option<(u64, Result<String, String>)>, change: Option<worktree::Change>, owner: Option<(u64, String)>) {
+        let mut why = None;
+        if let Some((iid, result)) = went {
+            self.doing.remove(&iid);
+            match result {
+                Ok(said) => {
+                    self.note = Some(said);
+                    self.wrote = Some(Instant::now());
+                    self.refresh();
+                }
+                Err(e) => why = Some(e),
+            }
+        }
+        let Some(change) = change else {
+            self.note = why.or(self.note.take());
+            return;
+        };
+        let free = matches!((&self.shown, &self.view.mode), (Shown::Board, Mode::Board));
+        self.note = Some(match owner {
+            Some((iid, branch)) if free => {
+                self.view.mode = Mode::Unpushed(Left { iid, branch, change, why });
+                return;
+            }
+            Some((iid, _)) => format!("your change to {} is still in the review checkout; leave a review and ot asks about it", bang(iid)),
+            None => format!(
+                "the review checkout holds edits on none of your MRs ({}), so it can't move to another MR: {}",
+                change.files.join(", "),
+                cache::review_tree(&self.cfg.project).display()
+            ),
+        });
+    }
+
+    fn on_pushed(&mut self, iid: u64, past: Option<(u64, u64)>, result: Result<Vec<String>, String>) {
+        match result {
+            Ok(left) => {
+                for l in &mut self.landings {
+                    l.pushed(iid);
+                }
+                self.keep_landings();
+                self.rebased(past);
+                self.written(iid);
+                if !left.is_empty() {
+                    self.note = Some(format!("rebased and pushed, but {}", left.join("; ")));
+                }
+            }
+            Err(e) => {
+                self.doing.remove(&iid);
+                self.note = Some(e);
+            }
+        }
+    }
+
+    fn stamp(&self) -> String {
+        let at = (self.snap.as_of > 0).then(|| {
+            let t = jiff::Timestamp::from_second(self.snap.as_of)
+                .unwrap_or_default()
+                .to_zoned(jiff::tz::TimeZone::system());
+            format!("as of {}", t.strftime("%H:%M"))
+        });
+        match (at, self.fetching) {
+            (Some(at), true) => format!("{at}  ·  asking GitLab…"),
+            (Some(at), false) => at,
+            (None, true) => "asking GitLab…".into(),
+            (None, false) => String::new(),
+        }
+    }
+
+    fn picked(&self) -> Option<&model::Mr> {
+        match self.view.at {
+            Some(Pick::Mr(iid)) => self.snap.mr(iid),
+            _ => None,
+        }
+    }
+
+    fn picked_agent(&self) -> Option<&hc::Agent> {
+        let address = match self.view.item(&self.board)? {
+            model::Item::Hc { address, .. } => address,
+            model::Item::Claude { terminal, .. } => terminal.as_ref()?,
+            _ => return None,
+        };
+        self.agents.iter().find(|a| a.address == *address)
+    }
+
+    fn picked_ticket(&self) -> Option<&model::Ticket> {
+        match &self.view.at {
+            Some(Pick::Ticket(id)) => self.tickets.iter().find(|t| t.id == *id),
+            _ => None,
+        }
+    }
+}
+
+fn main() {
+    if std::env::args().len() > 1 {
+        eprintln!("usage: ot\n  run it in a checkout whose origin is a GitLab project");
+        std::process::exit(2);
+    }
+    // Both git calls at once, since the first frame waits on them.
+    let here = std::thread::spawn(git::branch);
+    let cfg = match config::load() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("ot: {e}");
+            std::process::exit(1);
+        }
+    };
+    let mut snap = cache::load(&cfg.project).unwrap_or_default();
+    snap.here = here.join().unwrap_or_default();
+    let gitlab = Shared::new(&cfg.host);
+    let writer: Arc<dyn Writer> = Arc::new(gitlab::Live {
+        gitlab: gitlab.clone(),
+        project: cfg.project.clone(),
+    });
+    let (mut app, rx) = App::new(cfg, snap, gitlab, writer);
+    // Builds seam's language rules now, so the first review doesn't wait.
+    std::thread::spawn(review::rules);
+
+    let mut term = ratatui::init();
+    let _ = execute!(std::io::stdout(), EnableFocusChange, EnableBracketedPaste);
+    let result = run(&mut term, &mut app, rx);
+    let _ = execute!(std::io::stdout(), DisableFocusChange, DisableBracketedPaste);
+    ratatui::restore();
+    let _ = std::fs::remove_dir_all(nvim::scratch());
+    if let Err(e) = result {
+        eprintln!("ot: {e}");
+        std::process::exit(1);
+    }
+}
+
+/// The input thread lends the terminal out (to nvim) on request: it says it
+/// has parked, stops touching the terminal, polling included, since a poll
+/// reads keys, and waits to be given it back.
+struct Lend {
+    parked: Sender<()>,
+    back: Receiver<()>,
+}
+
+fn input(tx: Sender<Msg>, lend: Receiver<Lend>) {
+    loop {
+        if let Ok(l) = lend.try_recv() {
+            let _ = l.parked.send(());
+            let _ = l.back.recv();
+            continue;
+        }
+        match event::poll(Duration::from_millis(50)) {
+            Ok(true) => {
+                let Ok(ev) = event::read() else { return };
+                if tx.send(Msg::Term(ev)).is_err() {
+                    return;
+                }
+            }
+            Ok(false) => {}
+            Err(_) => return,
+        }
+    }
+}
+
+fn run(
+    term: &mut ratatui::DefaultTerminal,
+    app: &mut App,
+    rx: Receiver<Msg>,
+) -> std::io::Result<()> {
+    app.refresh();
+    draw(term, app)?;
+    let (lend, lent) = mpsc::channel();
+    let tx = app.tx.clone();
+    std::thread::spawn(move || input(tx, lent));
+    watch_claude(app.tx.clone());
+    let tx = app.tx.clone();
+    hc::watch(move |agents| {
+        let _ = tx.send(Msg::Hc(agents));
+    });
+    // Read once a run: who works here changes slower than ot restarts.
+    if let Some(token) = app.cfg.slack_token.clone() {
+        let tx = app.tx.clone();
+        std::thread::spawn(move || tx.send(Msg::Slack(slack::emails(&token))));
+    }
+    let (tx, gitlab, project) = (app.tx.clone(), app.gitlab.clone(), app.cfg.project.clone());
+    std::thread::spawn(move || tx.send(Msg::Members(gitlab.get().and_then(|g| g.members(&project)))));
+    let tx = app.tx.clone();
+    music::feed(move |frame| {
+        nvim::music(&frame);
+        let _ = tx.send(Msg::Music(frame));
+    });
+    loop {
+        let due = app
+            .seek_due
+            .map_or(app.next_fetch, |d| d.min(app.next_fetch));
+        let wait = due.saturating_duration_since(Instant::now());
+        let mut msgs: Vec<Msg> = match rx.recv_timeout(wait) {
+            Ok(m) => vec![m],
+            Err(RecvTimeoutError::Timeout) => vec![],
+            Err(RecvTimeoutError::Disconnected) => return Ok(()),
+        };
+        // Everything already waiting is handled before the next frame, so a
+        // burst of keys costs one draw.
+        msgs.extend(std::iter::from_fn(|| rx.try_recv().ok()));
+        if Instant::now() >= app.next_fetch {
+            app.refresh();
+        }
+        app.send_seek();
+        for m in msgs {
+            match m {
+                Msg::Fetched(answer) => app.on_fetched(answer),
+                Msg::Claude(sessions) => app.on_sessions(sessions),
+                Msg::Hc(agents) => {
+                    app.agents = agents;
+                    app.rebuild();
+                }
+                Msg::Found { query, hits } => app.on_found(&query, hits),
+                Msg::Played { url, result } => app.on_played(&url, result),
+                Msg::Music(frame) => app.on_music(frame),
+                Msg::Wrote { iid, doing, result } => app.on_wrote(iid, doing, result),
+                Msg::Step { iid, word, detail } => {
+                    app.doing.insert(iid, Doing { word: word.into(), detail, on_you: false });
+                }
+                Msg::Rebased { iid, result } => app.on_rebased(iid, result),
+                Msg::Pushed { iid, past, result } => app.on_pushed(iid, past, result),
+                Msg::Judged { read, result } => app.on_judged(read, result),
+                Msg::Brief { worker, result } => app.on_brief(worker, result),
+                Msg::Asked(how) => app.note = Some(how),
+                Msg::Described { iid, result } => app.on_described(iid, result),
+                Msg::Slack(Ok(emails)) => app.slack = emails,
+                Msg::Slack(Err(e)) => app.note = Some(format!("c can't complete from Slack: {e}")),
+                Msg::Members(Ok(names)) => app.members = names,
+                Msg::Members(Err(e)) => app.note = Some(format!("a completes only from the board: {e}")),
+                Msg::Tickets(answer) => app.on_tickets(answer),
+                Msg::Checkout { went, change, owner } => app.on_checkout(went, change, owner),
+                Msg::Term(Event::FocusGained) => {
+                    app.focused = true;
+                    app.refresh();
+                }
+                Msg::Term(Event::FocusLost) => app.focused = false,
+                Msg::Term(Event::Key(k)) if k.kind == KeyEventKind::Press => {
+                    let name = keys::name(&k);
+                    if let Some((screen, places)) = app.places() {
+                        cache::pressed(screen, &name, keys::act(&name, &places));
+                    }
+                    match key(app, &name) {
+                        Next::Stay => {}
+                        Next::Quit => return Ok(()),
+                        Next::Review(open) => review_in_nvim(term, &lend, app, open),
+                        Next::Attach(agent) => match lend_terminal(term, &lend, hc::attach(&agent.address)) {
+                            Ok(left) if left.success() => {}
+                            Ok(_) => app.note = Some(format!("hc couldn't attach to {}", agent.name)),
+                            Err(e) => app.note = Some(e),
+                        },
+                    }
+                }
+                Msg::Term(Event::Paste(text)) => pasted(app, &text),
+                Msg::Term(_) => {}
+            }
+        }
+        app.brief();
+        app.tell();
+        draw(term, app)?;
+    }
+}
+
+/// The review, in nvim, which has the terminal until it quits. Then what
+/// the review did (approved, commented) shows on the board.
+fn review_in_nvim(
+    term: &mut ratatui::DefaultTerminal,
+    lend: &Sender<Lend>,
+    app: &mut App,
+    open: nvim::Open,
+) {
+    if let Err(e) = lend_terminal(term, lend, nvim::command(&open)) {
+        app.note = Some(e);
+    }
+    app.server.end(open);
+    // However nvim was left (:wq, a crash), a change of yours it leaves in
+    // the checkout is asked about here.
+    app.checkout(None);
+    app.refresh();
+}
+
+/// A key goes to the screen that is up: to what it is asking or taking as
+/// text, else as the act the key is there (keys.rs).
+fn key(app: &mut App, name: &str) -> Next {
+    app.note = None;
+    if let Shown::Music(view) = &mut app.shown {
+        view.said = None;
+    }
+    let Some((_, places)) = app.places() else {
+        match &app.shown {
+            Shown::Music(_) => search_typed(app, name),
+            _ => answer(app, name),
+        }
+        return Next::Stay;
+    };
+    let Some(act) = keys::act(name, &places) else {
+        return Next::Stay;
+    };
+    match &app.shown {
+        Shown::Music(_) => music_act(app, act),
+        Shown::Session { .. } => session_act(app, act),
+        Shown::Board => return board_act(app, act),
+    }
+    Next::Stay
+}
+
+/// A paste goes into what you are typing as one line, and nowhere else:
+/// taken as keys, its line ends would send what is typed and the rest
+/// would act on the board.
+fn pasted(app: &mut App, text: &str) {
+    let into = match (&mut app.shown, &mut app.view.mode) {
+        (Shown::Music(view), _) => match &mut view.search {
+            musicui::Search::Typing(typed) => typed,
+            _ => return,
+        },
+        (Shown::Board, Mode::Tell { text, .. } | Mode::Note { text, .. } | Mode::Message(_, text)) => text,
+        (Shown::Board, Mode::Typing(t)) => {
+            t.cycling = None;
+            &mut t.text
+        }
+        _ => return,
+    };
+    into.push_str(&text.split_whitespace().collect::<Vec<_>>().join(" "));
+}
+
+/// A key typed into the music screen's search.
+fn search_typed(app: &mut App, name: &str) {
+    let Shown::Music(view) = &mut app.shown else { return };
+    let musicui::Search::Typing(text) = &mut view.search else { return };
+    match name {
+        "esc" => view.search = musicui::Search::Off,
+        "enter" => {
+            let query = text.trim().to_string();
+            if !query.is_empty() {
+                let tx = app.tx.clone();
+                let q = query.clone();
+                std::thread::spawn(move || {
+                    let hits = music::search(&q);
+                    let _ = tx.send(Msg::Found { query: q, hits });
+                });
+                view.search = musicui::Search::Searching(query);
+            }
+        }
+        _ => {
+            keys::edit(text, name);
+        }
+    }
+}
+
+/// The music screen's keys, and those of a search's results on it.
+fn music_act(app: &mut App, act: Act) {
+    let Shown::Music(view) = &mut app.shown else { return };
+    match act {
+        Act::Down => view.step(1),
+        Act::Up => view.step(-1),
+        Act::PlayNow | Act::PlayNext => {
+            if let Some(hit) = view.picked() {
+                let (url, tx) = (hit.url.clone(), app.tx.clone());
+                let now = act == Act::PlayNow;
+                app.loading = Some(Load {
+                    url: url.clone(),
+                    title: hit.title.clone(),
+                });
+                std::thread::spawn(move || {
+                    let result = music::play(&url, now);
+                    let _ = tx.send(Msg::Played { url, result });
+                });
+                view.search = musicui::Search::Off;
+            }
+        }
+        // From a search's results, back to the player; from that, the board.
+        Act::Leave if matches!(view.search, musicui::Search::Hits { .. }) => view.search = musicui::Search::Off,
+        Act::Leave => app.shown = Shown::Board,
+        Act::PlayPause => off_thread("cliamp", &["toggle"], String::new()),
+        Act::NextTrack => off_thread("cliamp", &["next"], String::new()),
+        Act::PrevTrack => off_thread("cliamp", &["prev"], String::new()),
+        Act::Shuffle => off_thread("cliamp", &["shuffle"], String::new()),
+        Act::Louder => volume(2),
+        Act::Softer => volume(-2),
+        Act::SeekForward => app.seek(10.0),
+        Act::SeekBack => app.seek(-10.0),
+        Act::Search => view.search = musicui::Search::Typing(String::new()),
+        _ => {}
+    }
+}
+
+/// The keys of a session being read.
+fn session_act(app: &mut App, act: Act) {
+    let Shown::Session { view, .. } = &mut app.shown else { return };
+    match act {
+        Act::Down => view.step(1),
+        Act::Up => view.step(-1),
+        Act::PageDown => view.page(1),
+        Act::PageUp => view.page(-1),
+        Act::Top => view.top(),
+        Act::Bottom => view.bottom(),
+        Act::Leave => app.shown = Shown::Board,
+        _ => {}
+    }
+}
+
+/// A key for what the board is asking or taking as text.
+fn answer(app: &mut App, name: &str) {
+    match std::mem::take(&mut app.view.mode) {
+        Mode::Board => {}
+        // Any key leaves the keys' screen.
+        Mode::Help => {}
+        // A question waits for its answer: y for yes, n or esc for no. Any
+        // other key is not one, so a stray one can't throw the work away.
+        Mode::Confirm { iid, plan } => {
+            match name {
+                "y" => carry_out(app, iid, plan),
+                "n" | "esc" => {}
+                _ => app.view.mode = Mode::Confirm { iid, plan },
+            }
+        }
+        // esc keeps it for later, on its row; n lets it go, and the
+        // landing waiting on it.
+        Mode::Rebase { iid, ready } => {
+            match name {
+                "y" => app.push(iid, ready),
+                "n" => {
+                    if let Some(i) = app.rebasing(iid) {
+                        let l = app.unland(i);
+                        app.note = Some(format!("stopped landing {}: you dropped {}'s rebase", l.names(), bang(iid)));
+                    }
+                }
+                "esc" => app.park(iid, ready),
+                _ => app.view.mode = Mode::Rebase { iid, ready },
+            }
+        }
+        // On y it waits for GitLab's next answer to take its first step.
+        Mode::Land(l) => {
+            match name {
+                "y" => {
+                    app.landings.push(l);
+                    app.keep_landings();
+                    app.refresh();
+                }
+                "n" | "esc" => {}
+                _ => app.view.mode = Mode::Land(l),
+            }
+        }
+        // Approving asks: y as it is, m with a note first.
+        Mode::Approve { iid } => {
+            match name {
+                "y" => {
+                    if let Some(plan) = app.snap.mr(iid).map(|mr| model::approve(mr, "")) {
+                        carry_out(app, iid, plan);
+                    }
+                }
+                "m" => {
+                    app.view.mode = Mode::Note {
+                        iid,
+                        text: String::new(),
+                    }
+                }
+                "n" | "esc" => {}
+                _ => app.view.mode = Mode::Approve { iid },
+            }
+        }
+        Mode::Note { iid, mut text } => {
+            match name {
+                "esc" => {}
+                "enter" => {
+                    if let Some(plan) = app.snap.mr(iid).map(|mr| model::approve(mr, &text)) {
+                        carry_out(app, iid, plan);
+                    }
+                }
+                _ => {
+                    keys::edit(&mut text, name);
+                    app.view.mode = Mode::Note { iid, text };
+                }
+            }
+        }
+        // Your change in the review checkout: a amends the commit it is on,
+        // c takes a message first, d puts it in git's stash, esc keeps it.
+        Mode::Unpushed(l) => {
+            match name {
+                "a" => {
+                    let Left { iid, branch, change, .. } = l;
+                    app.checkout(Some((iid, "pushing", Box::new(move |tree| worktree::push(tree, &branch, &change.on, worktree::Commit::Amend)))));
+                }
+                "c" => app.view.mode = Mode::Message(l, String::new()),
+                "d" => app.checkout(Some((l.iid, "putting aside", Box::new(worktree::put_aside)))),
+                "esc" => app.note = Some(format!("your change to {} stays in the review checkout, which can't move to another MR until it goes", bang(l.iid))),
+                _ => app.view.mode = Mode::Unpushed(l),
+            }
+        }
+        Mode::Message(l, mut text) => {
+            match name {
+                "esc" => app.view.mode = Mode::Unpushed(l),
+                "enter" => {
+                    let Left { iid, branch, change, .. } = l;
+                    app.checkout(Some((iid, "pushing", Box::new(move |tree| worktree::push(tree, &branch, &change.on, worktree::Commit::New(text))))));
+                }
+                _ => {
+                    keys::edit(&mut text, name);
+                    app.view.mode = Mode::Message(l, text);
+                }
+            }
+        }
+        Mode::Typing(t) => app.view.mode = typing(app, t, name),
+        Mode::Tell { to, mut text } => {
+            match name {
+                "esc" => {}
+                "enter" if text.trim().is_empty() => {}
+                "enter" => {
+                    app.note = Some(format!("sending to {}, once nobody is typing there…", to.name));
+                    let tx = app.tx.clone();
+                    std::thread::spawn(move || {
+                        let how = match hc::send(&to.address, &text) {
+                            Ok(()) => format!("sent to {}", to.name),
+                            Err(e) => format!("not sent to {}: {e}", to.name),
+                        };
+                        tx.send(Msg::Asked(how))
+                    });
+                }
+                _ => {
+                    keys::edit(&mut text, name);
+                    app.view.mode = Mode::Tell { to, text };
+                }
+            }
+        }
+        Mode::Stop(to) => {
+            match name {
+                "y" => {
+                    app.note = Some(format!("stopping {}…", to.name));
+                    let tx = app.tx.clone();
+                    std::thread::spawn(move || {
+                        let how = match hc::interrupt(&to.address) {
+                            Ok(true) => format!("{} stopped", to.name),
+                            Ok(false) => format!("{} is still working", to.name),
+                            Err(e) => format!("{} not stopped: {e}", to.name),
+                        };
+                        tx.send(Msg::Asked(how))
+                    });
+                }
+                "n" | "esc" => {}
+                _ => app.view.mode = Mode::Stop(to),
+            }
+        }
+    }
+}
+
+/// The board's keys on the row the cursor is on.
+fn board_act(app: &mut App, act: Act) -> Next {
+    let b = &app.board;
+    match act {
+        Act::Down => app.view.step(b, 1),
+        Act::Up => app.view.step(b, -1),
+        Act::Top => app.view.top(b),
+        Act::Bottom => app.view.bottom(b),
+        Act::Unfold => app.view.fold_open = true,
+        Act::Fold => app.view.fold_open = false,
+        // On a row whose rebase is ready, or that its landing says is
+        // ready to merge, enter asks about that instead.
+        Act::Review | Act::Tour => {
+            if act == Act::Review && app.picked().map(|mr| mr.iid).is_some_and(|iid| app.ask(iid) || app.ask_landing(iid)) {
+                return Next::Stay;
+            }
+            if let Some(mr) = app.picked().cloned() {
+                app.reviews_opened += 1;
+                return Next::Review(nvim::start(
+                    &app.server,
+                    &app.cfg.project,
+                    &mr,
+                    &app.snap.me,
+                    app.gitlab.clone(),
+                    app.reviews_opened,
+                    act == Act::Tour,
+                ));
+            }
+        }
+        Act::Music => app.shown = Shown::Music(musicui::View::default()),
+        Act::Read => {
+            if let Some(Pick::Session(id)) = &app.view.at {
+                app.shown = Shown::Session {
+                    id: id.clone(),
+                    agent: None,
+                    view: sessionui::View::at_end(),
+                };
+            }
+        }
+        Act::Attach => {
+            if let Some(a) = app.picked_agent() {
+                return Next::Attach(a.clone());
+            }
+        }
+        Act::Tell => {
+            if let Some(a) = app.picked_agent() {
+                app.view.mode = Mode::Tell { to: a.clone(), text: String::new() };
+            }
+        }
+        Act::Stop => {
+            if let Some(a) = app.picked_agent() {
+                app.view.mode = Mode::Stop(a.clone());
+            }
+        }
+        Act::Agent => {
+            let agent = match app.view.item(&app.board) {
+                Some(model::Item::Mr { agent, .. } | model::Item::Ticket { agent, .. }) => agent.as_ref(),
+                _ => None,
+            };
+            if let Some(w @ model::Worker { session: Some(id), .. }) = agent {
+                app.shown = Shown::Session {
+                    id: id.clone(),
+                    agent: w.agent.clone(),
+                    view: sessionui::View::at_end(),
+                };
+            }
+        }
+        Act::Ticket => {
+            if let Some(model::Item::Mr { ticket: Some(id), .. }) = app.view.item(&app.board) {
+                if let Some(t) = app.tickets.iter().find(|t| t.id == *id) {
+                    off_thread("open", &[&t.url], String::new());
+                }
+            }
+        }
+        Act::Reviewers => {
+            if let Some(mr) = app.picked() {
+                let now = model::others(&mr.reviewers, &app.snap.me);
+                let text = if now.is_empty() {
+                    String::new()
+                } else {
+                    format!("{}, ", now.join(", "))
+                };
+                app.view.mode = Mode::Typing(Typing {
+                    iid: mr.iid,
+                    text,
+                    cycling: None,
+                    sets: Sets::Reviewers,
+                });
+            }
+        }
+        // Read on the press, not taken from the board's last answer, so the
+        // cc goes onto the description as it was when you opened the input.
+        Act::Cc => {
+            if let Some(iid) = app.picked().map(|mr| mr.iid) {
+                app.note = Some(format!("reading {}'s cc…", bang(iid)));
+                let (gitlab, tx, project) = (app.gitlab.clone(), app.tx.clone(), app.cfg.project.clone());
+                std::thread::spawn(move || {
+                    let result = gitlab.get().and_then(|g| g.description(&project, iid));
+                    tx.send(Msg::Described { iid, result })
+                });
+            }
+        }
+        // On a ticket's row, the ticket.
+        Act::Link => {
+            if let Some(mr) = app.picked() {
+                off_thread("pbcopy", &[], mr.url.clone());
+                app.note = Some(format!("copied the link to {}", bang(mr.iid)));
+            } else if let Some(t) = app.picked_ticket() {
+                off_thread("pbcopy", &[], t.url.clone());
+                app.note = Some(format!("copied the link to {}", t.id));
+            }
+        }
+        Act::Web => {
+            let url = app.picked().map(|mr| &mr.url).or_else(|| app.picked_ticket().map(|t| &t.url));
+            if let Some(url) = url {
+                off_thread("open", &[url], String::new());
+            }
+        }
+        Act::Approve => {
+            if let Some(mr) = app.picked() {
+                app.view.mode = Mode::Approve { iid: mr.iid };
+            }
+        }
+        Act::Refresh => app.refresh(),
+        // Rebased here, not by GitLab (rebase.rs); it asks once it knows
+        // what it will do.
+        Act::Rebase => {
+            if let Some(iid) = app.picked().map(|mr| mr.iid) {
+                if !app.ask(iid) {
+                    app.rebase(iid);
+                }
+            }
+        }
+        // Again on a stack that is landing, it stops: every landing with
+        // that MR in it, as the MRs under a fork are in each branch's.
+        Act::Land => {
+            if let Some(mr) = app.picked() {
+                let iid = mr.iid;
+                if app.landing_of(iid).is_some() {
+                    let (stopped, kept): (Vec<land::Landing>, _) = std::mem::take(&mut app.landings).into_iter().partition(|l| l.iids.contains(&iid));
+                    app.landings = kept;
+                    app.keep_landings();
+                    let names: Vec<String> = stopped.iter().map(|l| l.names()).collect();
+                    app.note = Some(format!("stopped landing {}", names.join(" and ")));
+                } else if app.cfg.rules.deploy_job.is_none() {
+                    app.note = Some("landing waits on production deploys, so it needs git config ot.deployjob".into());
+                } else {
+                    match land::Landing::of(&app.snap, &app.was_on, mr) {
+                        Ok(l) => app.view.mode = Mode::Land(l),
+                        Err(e) => app.note = Some(e),
+                    }
+                }
+            }
+        }
+        Act::Help => app.view.mode = Mode::Help,
+        Act::Quit => return Next::Quit,
+        // Every other board key is a plan of writes to the MR (model::plan),
+        // asked about first when it can't be undone.
+        act => {
+            let planned = app
+                .picked()
+                .and_then(|mr| Some((mr.iid, model::plan(act, mr)?)));
+            if let Some((iid, plan)) = planned {
+                match plan.question {
+                    Some(_) => app.view.mode = Mode::Confirm { iid, plan },
+                    None => carry_out(app, iid, plan),
+                }
+            }
+        }
+    }
+    Next::Stay
+}
+
+
+/// The input of names: letters type, tab completes (again cycles), enter
+/// sets them, esc drops it. What the board does with the next key.
+fn typing(app: &mut App, mut t: Typing, name: &str) -> Mode {
+    match name {
+        "esc" => return Mode::Board,
+        "enter" => {
+            let plan = app.snap.mr(t.iid).map(|mr| match &t.sets {
+                Sets::Reviewers => model::reviewers(mr, &t.text),
+                Sets::Cc { description } => model::cc(mr, description, &t.text),
+            });
+            if let Some(plan) = plan {
+                carry_out(app, t.iid, plan);
+            }
+            return Mode::Board;
+        }
+        "tab" => {
+            let (typed, nth) = match t.cycling.take() {
+                Some((typed, nth)) => (typed, nth + 1),
+                None => (t.text.clone(), 0),
+            };
+            t.text = model::complete(&typed, &people(&t.sets, &app.snap, &app.members, &app.slack), nth);
+            t.cycling = Some((typed, nth));
+        }
+        _ => {
+            if keys::edit(&mut t.text, name) {
+                t.cycling = None;
+            }
+        }
+    }
+    Mode::Typing(t)
+}
+
+/// Who the input of names completes from: reviewers from the project and
+/// who the board has seen, a cc from everyone in your Slack.
+fn people<'a>(sets: &Sets, snap: &Snapshot, members: &[String], slack: &'a [String]) -> Cow<'a, [String]> {
+    match sets {
+        Sets::Reviewers => Cow::Owned(model::people(snap, members)),
+        Sets::Cc { .. } => Cow::Borrowed(slack),
+    }
+}
+
+/// A plan's writes, off the UI thread, its row saying what is happening.
+fn carry_out(app: &mut App, iid: u64, plan: model::Plan) {
+    app.doing.insert(iid, Doing::word(plan.doing));
+    let (writer, tx) = (app.writer.clone(), app.tx.clone());
+    std::thread::spawn(move || {
+        let result = write::all(writer.as_ref(), &plan.writes);
+        let doing = plan.doing;
+        let _ = tx.send(Msg::Wrote { iid, doing, result });
+    });
+}
+
+/// cliamp's volume `by` dB from where it is. The review's player in nvim
+/// runs the same cliamp commands (nvim/ot.lua, player_acts).
+fn volume(by: i32) {
+    let params = format!("{{\"value\":{by}}}");
+    off_thread(
+        "cliamp",
+        &["remote", "call", "volume.adjust", "--params", &params],
+        String::new(),
+    );
+}
+
+/// A command run for its effect, fed `input`, with nobody waiting on it.
+fn off_thread(cmd: &str, args: &[&str], input: String) {
+    let (cmd, args): (String, Vec<String>) =
+        (cmd.into(), args.iter().map(|a| a.to_string()).collect());
+    std::thread::spawn(move || {
+        let child = Command::new(&cmd)
+            .args(&args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+        if let Ok(mut c) = child {
+            if let Some(mut i) = c.stdin.take() {
+                let _ = i.write_all(input.as_bytes());
+            }
+            let _ = c.wait();
+        }
+    });
+}
+
+/// The terminal is the command's until it exits; then the board's again.
+fn lend_terminal(
+    term: &mut ratatui::DefaultTerminal,
+    lend: &Sender<Lend>,
+    mut cmd: Command,
+) -> Result<std::process::ExitStatus, String> {
+    let (parked, wait_parked) = mpsc::channel();
+    let (give_back, back) = mpsc::channel();
+    lend.send(Lend { parked, back })
+        .map_err(|e| e.to_string())?;
+    let _ = wait_parked.recv();
+    let _ = execute!(std::io::stdout(), DisableFocusChange, DisableBracketedPaste);
+    ratatui::restore();
+    let ran = cmd.status();
+    let _ = enable_raw_mode();
+    let _ = execute!(std::io::stdout(), EnterAlternateScreen, EnableFocusChange, EnableBracketedPaste);
+    let _ = term.clear();
+    let _ = give_back.send(());
+    ran.map_err(|e| format!("{}: {e}", cmd.get_program().to_string_lossy()))
+}
+
+fn draw(term: &mut ratatui::DefaultTerminal, app: &mut App) -> std::io::Result<()> {
+    if let Shown::Music(view) = &app.shown {
+        return term
+            .draw(|f| {
+                let aim = app.sought.map(|(_, at, _)| at);
+                let loading = app.loading.as_ref().map(|l| l.title.as_str());
+                musicui::draw(f, app.playing.as_ref(), &app.hills, aim, loading, view)
+            })
+            .map(|_| ());
+    }
+    if let Shown::Session { id, agent, view } = &mut app.shown {
+        // on_sessions keeps the one shown on the board, and a session's
+        // agents stay in it.
+        let s = app.sessions.iter().find(|s| s.id == *id).unwrap();
+        let now = jiff::Timestamp::now().as_second();
+        let t = match agent {
+            Some(name) => sessionui::Transcript::agent(s, name, now).unwrap(),
+            None => sessionui::Transcript::session(s, now),
+        };
+        return term.draw(|f| sessionui::draw(f, &t, now, view)).map(|_| ());
+    }
+    let stamp = app.stamp();
+    let people = match &app.view.mode {
+        Mode::Typing(t) => people(&t.sets, &app.snap, &app.members, &app.slack),
+        _ => Cow::default(),
+    };
+    let landing = land::said(&app.landings, &app.snap, &app.cfg.rules);
+    app.width = term.size().map_or(app.width, |s| s.width as usize);
+    term.draw(|f| {
+        let s = boardui::Screen {
+            snap: &app.snap,
+            board: &app.board,
+            rules: &app.cfg.rules,
+            project: &app.cfg.project,
+            stamp: &stamp,
+            error: app.error.as_deref(),
+            note: app.note.as_deref(),
+            doing: &app.doing,
+            landing: &landing,
+            people: &people,
+            tickets: &app.tickets,
+            briefs: &app.briefs,
+            now: jiff::Timestamp::now().as_second(),
+            playing: app.playing.as_ref(),
+            hills: &app.hills,
+        };
+        boardui::draw(f, &s, &mut app.view);
+    })?;
+    Ok(())
+}
+
+/// How often the board looks at what Claude is doing.
+const CLAUDE_EVERY: Duration = Duration::from_secs(2);
+
+/// The thread that watches Claude's sessions on this repo's checkouts and
+/// says when they change.
+fn watch_claude(tx: Sender<Msg>) {
+    std::thread::spawn(move || {
+        let mut reader = claude::Reader::default();
+        let mut last = vec![];
+        loop {
+            let found = reader.sessions(&git::worktrees(), jiff::Timestamp::now().as_second());
+            if found != last {
+                last = found.clone();
+                if tx.send(Msg::Claude(found)).is_err() {
+                    return;
+                }
+            }
+            std::thread::sleep(CLAUDE_EVERY);
+        }
+    });
+}
+
+/// The thread that refreshes the board, asking GitLab and, with a key,
+/// Linear on a thread of its own, so a slow Linear never holds GitLab's
+/// answer up, then bringing your local main up to origin's. Each () asks
+/// once; asks that pile up while one is out are answered by that one.
+fn fetcher(cfg: Config, gitlab: Shared, tx: Sender<Msg>) -> Sender<()> {
+    let (fetches, asked) = mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        while asked.recv().is_ok() {
+            while asked.try_recv().is_ok() {}
+            if let Some(key) = cfg.linear_key.clone() {
+                let (tx, since) = (tx.clone(), cfg.linear_since);
+                std::thread::spawn(move || tx.send(Msg::Tickets(linear::tickets(&key, since))));
+            }
+            let answer = gitlab.get().and_then(|g| snapshot(&cfg, &g));
+            let main = answer.as_ref().ok().map(|s| s.default_branch.clone());
+            if tx.send(Msg::Fetched(answer)).is_err() {
+                break;
+            }
+            // After the board has its answer, so it never waits on the fetch.
+            if let Some(main) = main {
+                git::forward(Path::new("."), &main);
+            }
+        }
+    });
+    fetches
+}
+
+/// GitLab's answer with what local git knows added (the branch you are on,
+/// how old your MRs' bases are), and, with ot.deployJob set, yours that
+/// merged and production doesn't have yet; kept for the next launch.
+fn snapshot(cfg: &Config, gl: &gitlab::GitLab) -> Result<Snapshot, String> {
+    let mut snap = gl.snapshot(&cfg.project)?;
+    snap.here = git::branch();
+    let me = snap.me.clone();
+    let mine: Vec<&mut model::Mr> = snap.mrs.iter_mut().filter(|m| m.author == me).collect();
+    let pairs: Vec<(&str, &str)> = mine
+        .iter()
+        .map(|m| (m.head.as_str(), m.target.as_str()))
+        .collect();
+    let ages = git::split_ages(&pairs);
+    for (m, age) in mine.into_iter().zip(ages) {
+        m.split_age = age;
+    }
+    // Yours that merged stay until production has them.
+    if let Some(job) = &cfg.rules.deploy_job {
+        let main = snap.default_branch.clone();
+        let (merged, prod) = std::thread::scope(|s| {
+            let prod = s.spawn(|| gl.production(&cfg.project, &main, job));
+            (gl.merged(&cfg.project, &main), prod.join().unwrap())
+        });
+        let (merged, prod) = (merged?, prod?);
+        let commits: Vec<&str> = merged.iter().map(|m| m.merge_commit.as_str()).collect();
+        let reach = git::reach(Path::new("."), &prod, &main, &commits);
+        // Read after the board, so one that merged in between is merged.
+        snap.mrs.retain(|o| merged.iter().all(|m| m.iid != o.iid));
+        for (m, r) in merged.into_iter().zip(reach) {
+            if r != model::Reach::Live {
+                snap.mrs.push(model::Mr { reach: Some(r), ..m });
+            }
+        }
+        // Yours on main still with one of those's own commits, which ot
+        // rebases past it on its own (App::due).
+        let merged: Vec<(u64, String)> = snap.mrs.iter().filter(|m| m.reach.is_some()).map(|m| (m.iid, m.head.clone())).collect();
+        let merged: Vec<(u64, &str)> = merged.iter().map(|(i, h)| (*i, h.as_str())).collect();
+        let on_main: Vec<&mut model::Mr> = snap.mrs.iter_mut().filter(|m| m.author == me && m.reach.is_none() && m.target == main).collect();
+        let heads: Vec<&str> = on_main.iter().map(|m| m.head.as_str()).collect();
+        let carries = git::carries(Path::new("."), &main, &merged, &heads);
+        for (m, c) in on_main.into_iter().zip(carries) {
+            m.carries = c;
+        }
+    }
+    // The last board kept is what this one's sizes are read from.
+    let known = cache::load(&cfg.project).map(|s| s.mrs).unwrap_or_default();
+    gl.size(&cfg.project, &mut snap.mrs, &known)?;
+    // A cache that can't be written costs the next launch its head start,
+    // nothing more.
+    let _ = cache::save(&cfg.project, &snap);
+    Ok(snap)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use model::fixture;
+    use write::{At, Recorder, Write};
+
+    fn app(writer: Arc<Recorder>) -> (App, Receiver<Msg>) {
+        let cfg = Config {
+            host: "git.example".into(),
+            project: "team/app".into(),
+            rules: fixture::rules(),
+            slack_token: None,
+            linear_key: None,
+            linear_since: None,
+        };
+        App::new(cfg, fixture::snapshot(), Shared::new("git.example"), writer)
+    }
+
+    /// Keys as typed, then what the writes came to.
+    fn press(app: &mut App, rx: &Receiver<Msg>, keys: &[&str]) -> Vec<Msg> {
+        for k in keys {
+            key(app, k);
+        }
+        std::iter::from_fn(|| rx.recv_timeout(Duration::from_millis(200)).ok()).collect()
+    }
+
+    fn onto(app: &mut App, iid: u64) {
+        while app.view.at != Some(Pick::Mr(iid)) {
+            app.view.step(&app.board, 1);
+        }
+    }
+
+    #[test]
+    fn a_ready_rebase_waits_on_its_row_until_enter_and_esc_keeps_it_there() {
+        use crate::rebase::{Layer, Rebased, Said};
+        let (mut app, _rx) = app(Arc::new(Recorder::default()));
+        let ready = || Rebased {
+            layers: vec![Layer {
+                iid: 105,
+                branch: "sam/retry-budget".into(),
+                remote: "a1".into(),
+                local: None,
+                start: "a1".into(),
+                new: "b2".into(),
+            }],
+            said: vec![Said { detail: false, text: "!105  Change 105".into() }],
+            question: "rebase it?".into(),
+            left_out: None,
+            settled: 0,
+            changed: vec![],
+        };
+        app.on_rebased(105, Ok(ready()));
+        assert!(matches!(app.view.mode, Mode::Board), "nothing pops up");
+        let row = app.doing.get(&105).unwrap();
+        assert!(row.on_you && row.word == "rebase ready");
+        onto(&mut app, 105);
+        key(&mut app, "enter");
+        assert!(matches!(app.view.mode, Mode::Rebase { iid: 105, .. }), "enter on its row asks");
+        key(&mut app, "j");
+        assert!(matches!(app.view.mode, Mode::Rebase { .. }), "a stray key is not an answer");
+        key(&mut app, "esc");
+        assert!(matches!(app.view.mode, Mode::Board) && app.prepared.contains_key(&105), "esc keeps it for later");
+        key(&mut app, "b");
+        key(&mut app, "n");
+        assert!(!app.prepared.contains_key(&105) && !app.doing.contains_key(&105), "n lets it go");
+    }
+
+    #[test]
+    fn t_on_a_row_an_agent_is_at_work_on_reads_that_agent() {
+        let (mut app, _rx) = app(Arc::new(Recorder::default()));
+        (app.snap, app.tickets, app.sessions) = fixture::swarm();
+        app.rebuild();
+        onto(&mut app, 302);
+        key(&mut app, "t");
+        assert!(matches!(&app.shown, Shown::Session { id, agent: Some(a), .. } if id == "s3" && a == "ap-2"));
+    }
+
+    #[test]
+    fn merge_asks_first_and_only_y_merges() {
+        let rec = Arc::new(Recorder::default());
+        let (mut app, rx) = app(rec.clone());
+        onto(&mut app, 105);
+        press(&mut app, &rx, &["m", "n"]);
+        assert!(rec.took().is_empty(), "anything but y leaves it");
+        let done = press(&mut app, &rx, &["m", "y"]);
+        assert_eq!(
+            rec.took(),
+            [Write::Merge {
+                iid: 105,
+                head: String::new()
+            }]
+        );
+        assert!(matches!(
+            done[..],
+            [Msg::Wrote {
+                iid: 105,
+                doing: "merging",
+                result: Ok(())
+            }]
+        ));
+        assert_eq!(
+            app.doing.get(&105).map(|d| d.word.as_str()),
+            Some("merging"),
+            "the row says so until GitLab's next answer"
+        );
+    }
+
+    #[test]
+    fn your_change_left_in_the_review_is_asked_about_until_you_say() {
+        let (mut app, rx) = app(Arc::new(Recorder::default()));
+        let change = worktree::Change { on: "h102".into(), subject: "Sum".into(), files: vec!["f".into()] };
+        app.on_checkout(None, Some(change.clone()), Some((102, "sam/sum".into())));
+        assert!(matches!(&app.view.mode, Mode::Unpushed(l) if l.iid == 102 && l.change == change && l.why.is_none()));
+        press(&mut app, &rx, &["x", "c", "S", "a", "y", " ", "i", "t"]);
+        assert!(matches!(&app.view.mode, Mode::Message(_, text) if text == "Say it"), "a stray key is no answer; c types a message");
+        press(&mut app, &rx, &["esc"]);
+        assert!(matches!(app.view.mode, Mode::Unpushed(_)), "esc goes back to the question");
+        press(&mut app, &rx, &["esc"]);
+        assert!(matches!(app.view.mode, Mode::Board) && app.note.as_deref().is_some_and(|n| n.contains("stays in the review checkout")));
+        // A try that didn't go asks again, saying why; one that did says what went.
+        app.on_checkout(Some((102, Err("refused".into()))), Some(change), Some((102, "sam/sum".into())));
+        assert!(matches!(&app.view.mode, Mode::Unpushed(l) if l.why.as_deref() == Some("refused")));
+        app.view.mode = Mode::Board;
+        app.on_checkout(Some((102, Ok("amended and pushed".into()))), None, None);
+        assert_eq!(app.note.as_deref(), Some("amended and pushed"));
+    }
+
+    #[test]
+    fn reviewers_are_typed_completed_and_set() {
+        let rec = Arc::new(Recorder::default());
+        let (mut app, rx) = app(rec.clone());
+        onto(&mut app, 102);
+        press(
+            &mut app,
+            &rx,
+            &["a", "a", "l", "tab", ",", " ", "k", "tab", "enter"],
+        );
+        assert_eq!(
+            rec.took(),
+            [Write::Reviewers {
+                iid: 102,
+                names: vec!["alex".into(), "kim".into()]
+            }]
+        );
+    }
+
+    #[test]
+    fn cc_opens_on_who_the_description_ccs_completes_from_slack_and_is_set() {
+        let rec = Arc::new(Recorder::default());
+        let (mut app, rx) = app(rec.clone());
+        app.slack = vec!["alex@team.example".into(), "kim@team.example".into()];
+        onto(&mut app, 102);
+        app.on_described(102, Ok("Fixes it.\n\ncc: alex@team.example".into()));
+        press(&mut app, &rx, &["k", "tab", "enter"]);
+        assert_eq!(
+            rec.took(),
+            [Write::Description {
+                iid: 102,
+                text: "Fixes it.\n\ncc: alex@team.example kim@team.example".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn approving_asks_first() {
+        let rec = Arc::new(Recorder::default());
+        let (mut app, rx) = app(rec.clone());
+        onto(&mut app, 201);
+        press(&mut app, &rx, &["A", "esc"]);
+        assert!(rec.took().is_empty());
+        press(&mut app, &rx, &["A", "y"]);
+        assert_eq!(
+            rec.took(),
+            [Write::Approve {
+                iid: 201,
+                head: String::new()
+            }]
+        );
+    }
+
+    #[test]
+    fn approving_with_a_note_says_it_first() {
+        let rec = Arc::new(Recorder::default());
+        let (mut app, rx) = app(rec.clone());
+        onto(&mut app, 201);
+        press(&mut app, &rx, &["A", "m", "o", "k", "enter"]);
+        assert_eq!(
+            rec.took(),
+            [
+                Write::Comment {
+                    iid: 201,
+                    at: At::Mr,
+                    body: "ok".into()
+                },
+                Write::Approve {
+                    iid: 201,
+                    head: String::new()
+                }
+            ]
+        );
+    }
+}

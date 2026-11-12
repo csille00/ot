@@ -1,0 +1,9 @@
+---
+source: src/ui/music.rs
+expression: "rows.join(\"\\n\")"
+---
+▇ ▅ ⎻                   
+█ █ ▇ ▂ ⎻ ⎽             
+█ █ █ █ ▇ ▅ ⎼           
+█ █ █ █ █ █ ▇ ▂         
+█ █ █ █ █ █ █ █ ▇ ▆ ▃ ▁

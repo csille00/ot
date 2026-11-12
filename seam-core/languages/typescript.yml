@@ -1,0 +1,129 @@
+#seam: extensions .ts .tsx
+#seam: grammars typescript tsx
+#seam: imports es
+#
+# The declarations seam lists in TypeScript, as ast-grep rules. LANG is
+# replaced by each grammar this file names; the node kinds are tree-sitter's,
+# the same in both.
+#
+# To add a language, copy this file, name the grammars ast-grep knows it by
+# and the extensions its files carry, and write the same rules against that
+# grammar's node kinds. Two things every rule must do, because the rest of
+# seam is built on them:
+#   - capture $N, the name, which is how a mention of it is found;
+#   - capture $B, the body, which is everything the signature is not. seam
+#     compares the text before $B across the two sides of the change, and
+#     that is what "the interface changed, not only the body" means.
+#
+# A language whose comments and strings are not // /* */ ' " ` says so in a
+# #seam: noise line, and one where a name before : or ? is not a key in a
+# #seam: keys line; rust.yml and python.yml both do.
+#
+# One written in ES modules says #seam: imports es, and then a name a file
+# mentions is another file's definition only when the file imports it from
+# there (seam-core reads this line; bin/seam does not yet).
+#
+# "Top level" is said as "no ancestor but the program or an export statement",
+# a not-inside, rather than as inside-program. Both mean the same, but ast-grep
+# prints the text of every node a positive relational rule matched as a label,
+# so inside-program carried a copy of the whole file on every match: 61MB of
+# JSON for one MR, and ten seconds in jq. A negation matches nothing to print.
+#
+# A const that is not an arrow function (constfn) has no signature to speak
+# of, so const and type keep the first line of the body.
+#
+# The comment rule is the odd one: every comment in the file, so that the
+# block right above a declaration can be counted as the declaration's.
+id: export
+language: LANG
+rule:
+  kind: export_statement
+  not: {inside: {stopBy: end, not: {kind: program}}}
+---
+id: fn
+language: LANG
+rule:
+  kind: function_declaration
+  not: {inside: {stopBy: end, not: {any: [{kind: program}, {kind: export_statement}]}}}
+  all:
+    - has: {field: name, pattern: $N}
+    - has: {field: body, pattern: $B}
+---
+id: class
+language: LANG
+rule:
+  any: [{kind: class_declaration}, {kind: abstract_class_declaration}]
+  not: {inside: {stopBy: end, not: {any: [{kind: program}, {kind: export_statement}]}}}
+  all:
+    - has: {field: name, pattern: $N}
+    - has: {field: body, pattern: $B}
+---
+id: interface
+language: LANG
+rule:
+  kind: interface_declaration
+  not: {inside: {stopBy: end, not: {any: [{kind: program}, {kind: export_statement}]}}}
+  all:
+    - has: {field: name, pattern: $N}
+    - has: {field: body, pattern: $B}
+---
+id: enum
+language: LANG
+rule:
+  kind: enum_declaration
+  not: {inside: {stopBy: end, not: {any: [{kind: program}, {kind: export_statement}]}}}
+  all:
+    - has: {field: name, pattern: $N}
+    - has: {field: body, pattern: $B}
+---
+id: type
+language: LANG
+rule:
+  kind: type_alias_declaration
+  not: {inside: {stopBy: end, not: {any: [{kind: program}, {kind: export_statement}]}}}
+  all:
+    - has: {field: name, pattern: $N}
+    - has: {field: value, pattern: $B}
+---
+id: constfn
+language: LANG
+rule:
+  kind: lexical_declaration
+  not: {inside: {stopBy: end, not: {any: [{kind: program}, {kind: export_statement}]}}}
+  has:
+    kind: variable_declarator
+    all:
+      - has: {field: name, pattern: $N}
+      - has: {field: value, kind: arrow_function, has: {field: body, pattern: $B}}
+---
+id: const
+language: LANG
+rule:
+  kind: lexical_declaration
+  not: {inside: {stopBy: end, not: {any: [{kind: program}, {kind: export_statement}]}}}
+  has:
+    kind: variable_declarator
+    all:
+      - has: {field: name, pattern: $N}
+      - has: {field: value, pattern: $B, not: {kind: arrow_function}}
+---
+id: method
+language: LANG
+rule:
+  kind: method_definition
+  not: {inside: {stopBy: end, not: {any: [{kind: class_body}, {kind: class_declaration}, {kind: abstract_class_declaration}, {kind: export_statement}, {kind: program}]}}}
+  all:
+    - has: {field: name, pattern: $N}
+    - has: {field: body, pattern: $B}
+---
+id: field
+language: LANG
+rule:
+  kind: public_field_definition
+  not: {inside: {stopBy: end, not: {any: [{kind: class_body}, {kind: class_declaration}, {kind: abstract_class_declaration}, {kind: export_statement}, {kind: program}]}}}
+  has: {field: name, pattern: $N}
+---
+id: comment
+language: LANG
+rule:
+  kind: comment

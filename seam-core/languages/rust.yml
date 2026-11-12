@@ -1,0 +1,127 @@
+#seam: extensions .rs
+#seam: grammars rust
+#seam: noise /\*[\s\S]*?\*/|//[^\n]*|"(?:[^"\\]|\\.)*"|'(?:[^'\\\n]|\\.)'
+#seam: keys :
+#
+# The declarations seam lists in Rust. See typescript.yml for what a rule must
+# capture and why "top level" is said as a not-inside.
+#
+# noise is what is not code: comments, strings (which may run over lines) and
+# char literals, which hold one character so that a lifetime ('a) is not read
+# as the start of one. keys: a name before a single colon is a field or a
+# binding, not a use; a::b is a path, and names both.
+#
+# A struct, an enum, a trait and an impl each hold members: fields, variants
+# and methods. An impl has no name of its own, so it captures no $N and is
+# named by its interface ("impl Display for Foo"), which is also what tells
+# two impls for one type apart.
+#
+# A tuple or unit struct has no body to speak of, so the whole line is its
+# interface. Items inside an inline mod are not listed: it is nearly always
+# #[cfg(test)] mod tests, which mentions everything it tests and would pull
+# what it tests off the top level. Its lines count on the file row.
+#
+# The comment rule takes attributes too, so a #[derive] or #[test] sits inside
+# the definition under it the way a doc comment does.
+id: export
+language: LANG
+rule:
+  kind: visibility_modifier
+  not: {inside: {stopBy: end, not: {any: [{kind: source_file}, {kind: function_item}, {kind: struct_item}, {kind: enum_item}, {kind: trait_item}, {kind: type_item}, {kind: const_item}, {kind: static_item}]}}}
+---
+id: fn
+language: LANG
+rule:
+  kind: function_item
+  not: {inside: {stopBy: end, not: {kind: source_file}}}
+  all:
+    - has: {field: name, pattern: $N}
+    - has: {field: body, pattern: $B}
+---
+id: struct
+language: LANG
+rule:
+  kind: struct_item
+  not: {inside: {stopBy: end, not: {kind: source_file}}}
+  has: {field: name, pattern: $N}
+  any:
+    - has: {field: body, kind: field_declaration_list, pattern: $B}
+    - not: {has: {field: body, kind: field_declaration_list}}
+---
+id: enum
+language: LANG
+rule:
+  kind: enum_item
+  not: {inside: {stopBy: end, not: {kind: source_file}}}
+  all:
+    - has: {field: name, pattern: $N}
+    - has: {field: body, pattern: $B}
+---
+id: trait
+language: LANG
+rule:
+  kind: trait_item
+  not: {inside: {stopBy: end, not: {kind: source_file}}}
+  all:
+    - has: {field: name, pattern: $N}
+    - has: {field: body, pattern: $B}
+---
+id: impl
+language: LANG
+rule:
+  kind: impl_item
+  not: {inside: {stopBy: end, not: {kind: source_file}}}
+  has: {field: body, pattern: $B}
+---
+id: type
+language: LANG
+rule:
+  kind: type_item
+  not: {inside: {stopBy: end, not: {kind: source_file}}}
+  all:
+    - has: {field: name, pattern: $N}
+    - has: {field: type, pattern: $B}
+---
+id: const
+language: LANG
+rule:
+  any: [{kind: const_item}, {kind: static_item}]
+  not: {inside: {stopBy: end, not: {kind: source_file}}}
+  all:
+    - has: {field: name, pattern: $N}
+    - has: {field: value, pattern: $B}
+---
+id: macro
+language: LANG
+rule:
+  kind: macro_definition
+  not: {inside: {stopBy: end, not: {kind: source_file}}}
+  has: {field: name, pattern: $N}
+---
+id: method
+language: LANG
+rule:
+  any:
+    - kind: function_item
+      has: {field: body, pattern: $B}
+    - kind: function_signature_item
+  not:
+    any:
+      - inside: {kind: source_file}
+      - inside: {stopBy: end, not: {any: [{kind: declaration_list}, {kind: impl_item}, {kind: trait_item}, {kind: source_file}]}}
+  has: {field: name, pattern: $N}
+---
+id: field
+language: LANG
+rule:
+  any:
+    - kind: field_declaration
+      not: {inside: {stopBy: end, not: {any: [{kind: field_declaration_list}, {kind: struct_item}, {kind: source_file}]}}}
+    - kind: enum_variant
+      not: {inside: {stopBy: end, not: {any: [{kind: enum_variant_list}, {kind: enum_item}, {kind: source_file}]}}}
+  has: {field: name, pattern: $N}
+---
+id: comment
+language: LANG
+rule:
+  any: [{kind: line_comment}, {kind: block_comment}, {kind: attribute_item}]

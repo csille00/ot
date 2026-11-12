@@ -1,0 +1,13 @@
+---
+source: src/ui/music.rs
+expression: "crate::ui::text(&t)"
+---
+  ♪ music                                   nothing playing
+
+  cliamp is not running
+    ╭──────────────────────────────────────────────────╮
+    │ search YouTube for                               │
+    │ lofi▏                                            │
+    │                                                  │
+    │ enter searches  esc drops                        │
+    ╰──────────────────────────────────────────────────╯

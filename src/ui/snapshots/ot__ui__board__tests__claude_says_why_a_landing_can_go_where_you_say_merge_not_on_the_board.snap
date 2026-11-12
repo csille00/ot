@@ -1,0 +1,33 @@
+---
+source: src/ui/board.rs
+expression: "frame_of((snap, vec![], vec![]), &landing, 100, 30, |_, v|\n{\n    v.at = Some(Pick::Mr(105)); v.mode = Mode::Confirm\n    { iid: 105, plan: model::plan(Act::Merge, &mr).unwrap() };\n})"
+---
+ ot  team/app                                                                           as of 13:44
+
+   main
+    │
+    ├─ ● parser-cleanup                                                      rebase it         !101
+    │  └─ ● parser-errors                                                    rebasing…         !102
+    │     └─ · parser-ab                                                     draft             !103
+    ├─ ● c╭──────────────────────────────────────────────────────────────────────────────╮e    !104
+  ▌ ├─ ● r│ Claude: It only reads the column !104 adds once it is there.                 │     !105
+    ├─ ● a│                                                                              │ads  !106
+    ├─ ◐ w│ merge !105 into main?                                                        │     !107
+    ├─ ○ q│                                                                              │     !108
+    ├─ ◐ l│ y yes  n no                                                                  │     !109
+    │     ╰──────────────────────────────────────────────────────────────────────────────╯
+    ├─ ● alex/route-table                                                    review it         !201
+    ├─ ✓ kim/flag-cleanup                                                    you approved      !202
+    │  └─ ● kim/flag-cleanup-two                                             review it         !203
+    │
+    └─ ◆ sam/scratch                                                         you are here
+
+    ▸ 3 not sent
+
+
+
+ ──────────────────────────────────────────────────────────────────────────────────────────────────
+  Change 105                                                                                   !105
+  landing !104, !105: enter merges this one, once you say y; L stops it
+  ● merge it  ·  pipeline passed  ·  approved by kim  ·  +12 −3 in 2 files
+ ──────────────────────────────────────────────────────────────────────────────────────────────────

@@ -1,0 +1,48 @@
+---
+source: src/ui/board.rs
+expression: "frame_of(fixture::swarm(), &HashMap::new(), 110, 44, |_, v|\n{ v.at = Some(Pick::Ticket(\"AP-4\".into())); })"
+---
+ ot  team/app                                                                                     as of 13:44
+
+   main
+    │
+    ├─ ● parser-cleanup                                                       rebase it                  !101
+    │  └─ ● parser-errors                                                     rebasing…                  !102
+    │     └─ · parser-ab                                                      draft                      !103
+    ├─ ● cache-keys                                                           pipeline broke             !104
+    ├─ ● retry-budget                                                         merge it                   !105
+    ├─ ● a-branch-name-long-enough-that-it-has-to-wrap-under-its-own-column   answer 3 threads           !106
+    ├─ ◐ warm-cache                                                           running                    !107
+    ├─ ○ quiet-but-sent                                                       in review                  !108
+    ├─ ◐ lands-itself                                                         merges itself              !109
+    │
+    │  Parser migration
+    ├─ ○ ap-1-grammar-file                                                    in review            AP-1  !301
+    │  └─ ○ ap-2-recovery                                                     Claude working…      AP-2  !302
+    │     └─ · Parser lookup tables                                           waits on AP-2        AP-3
+    │        └─ · Alert on parser slowdowns                                   waits on AP-3        AP-6
+  ▌ ├─ ○ Line numbers in parse errors                                         agent waiting        AP-4
+    │
+    ├─ ● alex/route-table                                                     review it                  !201
+    ├─ ✓ kim/flag-cleanup                                                     you approved               !202
+    │  └─ ● kim/flag-cleanup-two                                              review it                  !203
+    │
+    └─ ◆ sam/scratch                                                          you are here
+
+   claude
+    ○ Parser migration agents                                                 waiting on you               2m
+
+    ▸ 3 not sent
+
+
+
+ ────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Line numbers in parse errors                                                                           AP-4
+  ○ agent waiting  ·  In Progress  ·  in Parser migration  ·  no MR yet
+  ap-4 waiting, 6m: Line numbers show in errors from 4f1c2d9; it waits on you to say whether the backfill
+  (AP-5) goes in the same MR.
+
+  ●━━━━━━━━━●─────────○─────────○─────────○─────────○
+  ticket    agent     draft     review    merged    live
+ ────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  y link  w web  t agent                                                                               ? keys

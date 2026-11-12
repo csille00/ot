@@ -1,0 +1,20 @@
+---
+source: src/ui/session.rs
+expression: "frame(80, 16, |_| {})"
+---
+ ot  Why the parser's error paths read         waiting on you  ·  25m  ·  $0.40
+     better apart
+
+           · searching for ParseError
+
+  claude   Three error paths share one match arm with the happy path. I'll   2h
+           move them to errors.rs first.
+
+           The tests stay where they are.
+           · editing src/errors.rs
+           · editing src/parser.rs ×3
+           · Run the tests
+
+  claude   The errors module is done; the tests pass. Want the happy path   25m
+           next?
+  G end  q back

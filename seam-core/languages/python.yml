@@ -1,0 +1,111 @@
+#seam: extensions .py .pyi
+#seam: grammars python
+#seam: noise #[^\n]*|(?:\b[rRbBuUfF]{1,2})?(?:"""[\s\S]*?"""|'''[\s\S]*?'''|"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*')
+#seam: keys
+#
+# The declarations seam lists in Python. See typescript.yml for what a rule
+# must capture and why "top level" is said as a not-inside.
+#
+# noise is what is not code: # comments and strings, triple-quoted ones (and
+# so docstrings) included. keys is empty: a colon in Python ends a def, an if
+# or a lambda's parameters, and the name before it is as often a use (-> Foo:,
+# in ITEMS:) as not.
+#
+# A decorated definition is listed from its first decorator, so the
+# decorators are part of the interface: @property to a plain method, or
+# @dataclass(frozen=True), changes how everything that uses it may. The
+# function or class a decorated_definition wraps is not listed again.
+#
+# Exported is a name that does not start with an underscore, which is the
+# only public Python has. A class's fields are its annotated or assigned
+# names, which for a dataclass are its interface.
+id: export
+language: LANG
+rule:
+  any:
+    - {kind: function_definition, has: {field: name, regex: '^[^_]'}}
+    - {kind: class_definition, has: {field: name, regex: '^[^_]'}}
+    - {kind: decorated_definition, has: {field: definition, has: {field: name, regex: '^[^_]'}}}
+    - {kind: expression_statement, has: {kind: assignment, has: {field: left, kind: identifier, regex: '^[^_]'}}}
+  not: {inside: {stopBy: end, not: {kind: module}}}
+---
+id: fn
+language: LANG
+rule:
+  any:
+    - kind: function_definition
+      all:
+        - has: {field: name, pattern: $N}
+        - has: {field: body, pattern: $B}
+    - kind: decorated_definition
+      has:
+        field: definition
+        kind: function_definition
+        all:
+          - has: {field: name, pattern: $N}
+          - has: {field: body, pattern: $B}
+  not: {inside: {stopBy: end, not: {kind: module}}}
+---
+id: class
+language: LANG
+rule:
+  any:
+    - kind: class_definition
+      all:
+        - has: {field: name, pattern: $N}
+        - has: {field: body, pattern: $B}
+    - kind: decorated_definition
+      has:
+        field: definition
+        kind: class_definition
+        all:
+          - has: {field: name, pattern: $N}
+          - has: {field: body, pattern: $B}
+  not: {inside: {stopBy: end, not: {kind: module}}}
+---
+id: const
+language: LANG
+rule:
+  kind: expression_statement
+  not: {inside: {stopBy: end, not: {kind: module}}}
+  has:
+    kind: assignment
+    all:
+      - has: {field: left, kind: identifier, pattern: $N}
+      - has: {field: right, pattern: $B}
+---
+id: method
+language: LANG
+rule:
+  any:
+    - kind: function_definition
+      not: {inside: {kind: decorated_definition}}
+      all:
+        - has: {field: name, pattern: $N}
+        - has: {field: body, pattern: $B}
+    - kind: decorated_definition
+      has:
+        field: definition
+        kind: function_definition
+        all:
+          - has: {field: name, pattern: $N}
+          - has: {field: body, pattern: $B}
+  not:
+    any:
+      - inside: {kind: module}
+      - inside: {stopBy: end, not: {any: [{kind: block}, {kind: class_definition}, {kind: decorated_definition}, {kind: module}]}}
+---
+id: field
+language: LANG
+rule:
+  kind: expression_statement
+  has: {kind: assignment, has: {field: left, kind: identifier, pattern: $N}}
+  not:
+    any:
+      - inside: {kind: module}
+      - inside: {stopBy: end, not: {any: [{kind: block}, {kind: class_definition}, {kind: decorated_definition}, {kind: module}]}}
+---
+id: comment
+language: LANG
+rule:
+  kind: comment

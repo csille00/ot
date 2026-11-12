@@ -1,0 +1,52 @@
+---
+source: src/ui/board.rs
+expression: "frame(160, 48, |b, v| v.step(b, 5))"
+---
+ ot  team/app                                                                                                                                       as of 13:44
+
+   main
+    │
+    ├─ ● parser-cleanup                                                       rebase it                                                                    !101
+    │  └─ ● parser-errors                                                     rebasing…                                                                    !102
+    │     └─ · parser-ab                                                      draft                                                                        !103
+    ├─ ● cache-keys                                                           pipeline broke                                                               !104
+    ├─ ● retry-budget                                                         merge it                                                                     !105
+  ▌ ├─ ● a-branch-name-long-enough-that-it-has-to-wrap-under-its-own-column   answer 3 threads                                                             !106
+    ├─ ◐ warm-cache                                                           running                                                                      !107
+    ├─ ○ quiet-but-sent                                                       in review                                                                    !108
+    ├─ ◐ lands-itself                                                         merges itself                                                                !109
+    │
+    ├─ ● alex/route-table                                                     review it                                                                    !201
+    ├─ ✓ kim/flag-cleanup                                                     you approved                                                                 !202
+    │  └─ ● kim/flag-cleanup-two                                              review it                                                                    !203
+    │
+    └─ ◆ sam/scratch                                                          you are here
+
+   claude
+    ◐ A fresh board                                                           working                                                                        1m
+    ○ Why the parser's error paths read better apart                          waiting on you                                                                25m
+
+    ▸ 3 not sent
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Change 106                                                                                                                                               !106
+  ● answer 3 threads  ·  pipeline passed  ·  3 open threads  ·  waiting on kim  ·  +12 −3 in 2 files
+ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  enter open  y link  w web  T tour  m merge  b rebase  N pipeline  L land  a reviewers  c cc  X close                                                   ? keys

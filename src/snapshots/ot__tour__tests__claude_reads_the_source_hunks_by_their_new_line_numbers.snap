@@ -1,0 +1,26 @@
+---
+source: src/tour.rs
+expression: listing
+---
+
+== src/sum.ts
+       - import { a } from "./a";
+     1 + import { a, b } from "./a";
+     2   
+     3   export function total(items: number[]) {
+       -   let sum = 0;
+       -   for (const i of items) sum += i;
+       -   return sum;
+     4 +   return items.reduce((s, i) => s + i, 0);
+     5   }
+     6   
+       - function unused() {
+       -   return 1;
+     7   export function report(items: number[]) {
+     8 +   return `total ${total(items)} of ${count(items)}`;
+     9   }
+    10   
+       -   return "total " + total(items);
+    11 + export function count(items: number[]) {
+    12 +   return items.length;
+    13   }

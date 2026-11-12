@@ -1,0 +1,48 @@
+---
+source: src/ui/board.rs
+expression: "frame_of(fixture::swarm(), &HashMap::new(), 110, 44, |b, v|\n{ while v.at != Some(Pick::Mr(302)) { v.step(b, 1); } })"
+---
+ ot  team/app                                                                                     as of 13:44
+
+   main
+    │
+    ├─ ● parser-cleanup                                                       rebase it                  !101
+    │  └─ ● parser-errors                                                     rebasing…                  !102
+    │     └─ · parser-ab                                                      draft                      !103
+    ├─ ● cache-keys                                                           pipeline broke             !104
+    ├─ ● retry-budget                                                         merge it                   !105
+    ├─ ● a-branch-name-long-enough-that-it-has-to-wrap-under-its-own-column   answer 3 threads           !106
+    ├─ ◐ warm-cache                                                           running                    !107
+    ├─ ○ quiet-but-sent                                                       in review                  !108
+    ├─ ◐ lands-itself                                                         merges itself              !109
+    │
+    │  Parser migration
+    ├─ ○ ap-1-grammar-file                                                    in review            AP-1  !301
+  ▌ │  └─ ○ ap-2-recovery                                                     Claude working…      AP-2  !302
+    │     └─ · Parser lookup tables                                           waits on AP-2        AP-3
+    │        └─ · Alert on parser slowdowns                                   waits on AP-3        AP-6
+    ├─ ○ Line numbers in parse errors                                         agent waiting        AP-4
+    │
+    ├─ ● alex/route-table                                                     review it                  !201
+    ├─ ✓ kim/flag-cleanup                                                     you approved               !202
+    │  └─ ● kim/flag-cleanup-two                                              review it                  !203
+    │
+    └─ ◆ sam/scratch                                                          you are here
+
+   claude
+    ○ Parser migration agents                                                 waiting on you               2m
+
+    ▸ 3 not sent
+
+
+
+
+ ────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Change 302                                                                                             !302
+  ◐ Claude working…  ·  pipeline passed  ·  waiting on kim  ·  on !301  ·  +12 −3 in 2 files
+  ap-2 working, 6m: editing src/recover.rs
+
+  ●━━━━━━━━━●━━━━━━━━━●━━━━━━━━━●─────────○─────────○
+  ticket    agent     draft     review    merged    live
+ ────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  enter open  y link  w web  T tour  t agent  l ticket  m merge  b rebase  N pipeline  L land          ? keys

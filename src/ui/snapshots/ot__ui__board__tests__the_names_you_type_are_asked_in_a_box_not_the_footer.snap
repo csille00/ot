@@ -1,0 +1,27 @@
+---
+source: src/ui/board.rs
+expression: "frame(80, 24, |_, v|\n{\n    v.mode =\n    Mode::Typing(Typing\n    {\n        iid: 102, text: \"maggie@acme.com alex\".into(), cycling: None, sets:\n        Sets::Cc { description: String::new() },\n    })\n})"
+---
+ ot  team/app                                                       as of 13:44
+
+   main
+    │
+  ▌ ├─ ● parser-cleanup                                  rebase it         !101
+    │  └─ ● parser-errors                                rebasing…         !102
+    ╭──────────────────────────────────────────────────────────────────────╮103
+    │ cc on !102:                                                          │104
+    │ maggie@acme.com alex▏                                                │105
+    │                                                                      │106
+    │                                                                      │
+    │                                                                      │107
+    │                                                                      │108
+    │ tab completes  enter sets  esc drops                                 │109
+    ╰──────────────────────────────────────────────────────────────────────╯
+    ├─ ● alex/route-table                                review it         !201
+    ├─ ✓ kim/flag-cleanup                                you approved      !202
+    │  └─ ● kim/flag-cleanup-two                         review it         !203
+ ──────────────────────────────────────────────────────────────────────────────
+  Split the parser's error paths from its happy path so each reads alone   !101
+  ● rebase it  ·  split from main 6 days ago  ·  stale-check failed
+  nobody asked to review  ·  +1,083 −72 in 12 files
+ ──────────────────────────────────────────────────────────────────────────────
