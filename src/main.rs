@@ -22,6 +22,8 @@ mod nvim;
 mod rebase;
 mod review;
 mod slack;
+mod t3;
+mod term;
 mod tour;
 mod ui;
 mod worktree;
@@ -315,12 +317,26 @@ impl App {
     }
 
     fn rebuild(&mut self) {
+        // A T3 thread in the shared checkout is on the branch of the MR it made.
+        let agents: Vec<hc::Agent> = self
+            .agents
+            .iter()
+            .cloned()
+            .map(|mut a| {
+                if a.branch.is_empty() {
+                    if let Some(m) = t3::mr(&a.address, &self.cfg.project).and_then(|iid| self.snap.mr(iid)) {
+                        a.branch = m.source.clone();
+                    }
+                }
+                a
+            })
+            .collect();
         self.board = model::board(
             &self.snap,
             &self.cfg.rules,
             &self.was_on,
             &self.sessions,
-            &self.agents,
+            &agents,
             &self.tickets,
             jiff::Timestamp::now().as_second(),
         );
@@ -363,9 +379,7 @@ impl App {
             .collect();
         self.told = now;
         if !news.is_empty() && !self.focused {
-            // The text goes as an argument, so nothing in it is read as script.
-            let script = ["-e", "on run argv", "-e", "display notification (item 1 of argv) with title \"ot\"", "-e", "end run"];
-            off_thread("osascript", &[&script[..], &[&news.join("\n")]].concat(), String::new());
+            term::notify(&news.join("\n"));
         }
     }
 
@@ -1081,6 +1095,10 @@ fn run(
                         Next::Stay => {}
                         Next::Quit => return Ok(()),
                         Next::Review(open) => review_in_nvim(term, &lend, app, open),
+                        Next::Attach(agent) if t3::owns(&agent.address) => match t3::link(&agent.address) {
+                            Some(link) => app.note = Some(term::open(&link).unwrap_or_else(|| format!("opened {} in T3", agent.name))),
+                            None => app.note = Some(format!("no T3 link for {}", agent.name)),
+                        },
                         Next::Attach(agent) => match lend_terminal(term, &lend, hc::attach(&agent.address)) {
                             Ok(left) if left.success() => {}
                             Ok(_) => app.note = Some(format!("hc couldn't attach to {}", agent.name)),
@@ -1450,7 +1468,7 @@ fn board_act(app: &mut App, act: Act) -> Next {
         Act::Ticket => {
             if let Some(model::Item::Mr { ticket: Some(id), .. }) = app.view.item(&app.board) {
                 if let Some(t) = app.tickets.iter().find(|t| t.id == *id) {
-                    off_thread("open", &[&t.url], String::new());
+                    app.note = term::open(&t.url);
                 }
             }
         }
@@ -1485,17 +1503,17 @@ fn board_act(app: &mut App, act: Act) -> Next {
         // On a ticket's row, the ticket.
         Act::Link => {
             if let Some(mr) = app.picked() {
-                off_thread("pbcopy", &[], mr.url.clone());
+                term::copy(&mr.url);
                 app.note = Some(format!("copied the link to {}", bang(mr.iid)));
             } else if let Some(t) = app.picked_ticket() {
-                off_thread("pbcopy", &[], t.url.clone());
+                term::copy(&t.url);
                 app.note = Some(format!("copied the link to {}", t.id));
             }
         }
         Act::Web => {
             let url = app.picked().map(|mr| &mr.url).or_else(|| app.picked_ticket().map(|t| &t.url));
-            if let Some(url) = url {
-                off_thread("open", &[url], String::new());
+            if let Some(url) = url.cloned() {
+                app.note = term::open(&url);
             }
         }
         Act::Approve => {

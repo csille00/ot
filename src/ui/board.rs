@@ -936,7 +936,8 @@ fn panel_lines(s: &Screen, v: &View, right: usize) -> Vec<Line<'static>> {
             let Some(Item::Hc { name, status, said, mr, .. }) = v.item(s.board) else {
                 return vec![];
             };
-            out.extend(title_lines(name, &format!("hc {address}"), right));
+            let at = if crate::t3::owns(address) { "t3".to_string() } else { format!("hc {address}") };
+            out.extend(title_lines(name, &at, right));
             out.extend(prose(said, DIM, text));
             let (glyph, word, color) = hc_look(*status);
             let state = Span::styled(format!("{glyph} {word}"), fg(color));

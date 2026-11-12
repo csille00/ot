@@ -57,6 +57,9 @@ const AGAIN_IN: Duration = Duration::from_secs(5);
 /// they change, as hc says one came, went or says something new of
 /// itself (`hc events`).
 pub fn watch(mut tell: impl FnMut(Vec<Agent>) + Send + 'static) {
+    if crate::t3::bin().is_some() {
+        return crate::t3::watch(tell);
+    }
     let (wake, woken) = mpsc::channel();
     std::thread::spawn(move || loop {
         follow(&wake);
@@ -119,12 +122,18 @@ pub fn attach(address: &str) -> Command {
 /// Types `text` to the agent and presses enter, once nobody has typed
 /// there for a few seconds; or hc's reason it didn't.
 pub fn send(address: &str, text: &str) -> Result<(), String> {
+    if crate::t3::owns(address) {
+        return crate::t3::send(address, text);
+    }
     call(&["send", "--", address, text]).map(|_| ())
 }
 
 /// Presses the agent's stop key and watches it ten seconds: whether it
 /// stopped.
 pub fn interrupt(address: &str) -> Result<bool, String> {
+    if crate::t3::owns(address) {
+        return crate::t3::interrupt(address);
+    }
     let said = call(&["interrupt", "--", address])?;
     Ok(matches!(said["outcome"].as_str(), Some("stopped" | "exited")))
 }

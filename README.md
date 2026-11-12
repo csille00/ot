@@ -16,6 +16,8 @@ Run `ot` in a checkout whose `origin` is a GitLab project. It uses `GITLAB_TOKEN
 
 - git, and nvim for reviews. ot brings its own nvim plugin, and your config and LSP load as usual.
 - The `claude` CLI for the parts Claude does: settling rebase conflicts, deciding which MRs in a stack can ship in one deploy, the tour of a change (`T`), and a line on where a stopped agent left things.
+- T3 Code, if installed (`~/.t3`, or `T3_BIN`): its threads in this checkout's T3 project show as the board's agents, matched to MRs by the ones they opened. `s` sends a thread a message, enter opens it in T3. It takes herdr's place when both are here.
+- Over ssh or in zellij, `y` copies through OSC 52, `w` copies the link, and notifications go out as OSC 777, so they reach the terminal you look at.
 - Optionally ffmpeg for video thumbnails in descriptions, herdr's `hc` to show agents running in herdr terminals, and cliamp with yt-dlp for the music screen.
 
 Built and used on macOS. Notifications are macOS only, and Linux is untested.
