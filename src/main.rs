@@ -2717,6 +2717,8 @@ fn draw(term: &mut ratatui::DefaultTerminal, app: &mut App) -> std::io::Result<(
     let mr = app.thread_mr().filter(|_| !app.panel.hidden && width >= 140).cloned();
     let patch = mr.as_ref().and_then(|m| app.patches.get(&m.iid)).map(|(_, p)| p.clone());
     let panel = mr.as_ref().map(|m| (m, patch.as_ref()));
+    // A T3 thread waiting on you ends with what it asks.
+    let waits = app.reply_to().and_then(|a| t3::waits_turn(&a.address));
     let panel_scroll = &mut app.panel.view;
     if let Shown::Session { id, agent, view } = &mut app.shown {
         // on_sessions keeps the one shown on the board, and a session's
@@ -2726,6 +2728,14 @@ fn draw(term: &mut ratatui::DefaultTerminal, app: &mut App) -> std::io::Result<(
         let t = match agent {
             Some(name) => sessionui::Transcript::agent(s, name, now).unwrap(),
             None => sessionui::Transcript::session(s, now),
+        };
+        let more: Vec<claude::Turn>;
+        let t = match &waits {
+            Some(w) => {
+                more = [t.turns, std::slice::from_ref(w)].concat();
+                sessionui::Transcript { turns: &more, ..t }
+            }
+            None => t,
         };
         let note = app.note.as_deref();
         let images = app.images.as_mut();
@@ -2765,6 +2775,14 @@ fn draw(term: &mut ratatui::DefaultTerminal, app: &mut App) -> std::io::Result<(
         if turns.is_empty() {
             facts.insert(0, "reading…".to_string());
         }
+        let more: Vec<claude::Turn>;
+        let turns: &[claude::Turn] = match &waits {
+            Some(w) => {
+                more = [turns.as_slice(), std::slice::from_ref(w)].concat();
+                &more
+            }
+            None => turns,
+        };
         let t = sessionui::Transcript { title: agent.name.clone(), facts, turns, voices: ["you", "claude"] };
         let note = app.note.as_deref();
         let images = app.images.as_mut();

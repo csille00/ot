@@ -233,6 +233,59 @@ fn said(db: &Connection, id: &str) -> rusqlite::Result<Vec<Said>> {
     Ok(said)
 }
 
+/// What T3 threads wait on you for, by thread: each question they ask (with its
+/// choices) or approval they want, as a line to read. From T3's database, since
+/// a thread waiting on you still says it is running.
+pub fn pending() -> HashMap<String, Vec<String>> {
+    let mut out: HashMap<String, Vec<String>> = HashMap::new();
+    let Ok(db) = connect() else { return out };
+    let Ok(mut stmt) = db.prepare(
+        "SELECT thread_id, kind, payload_json FROM orchestration_v2_projection_runtime_requests
+          WHERE status = 'pending' ORDER BY created_at",
+    ) else {
+        return out;
+    };
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)));
+    for (thread, kind, payload) in rows.into_iter().flatten().flatten() {
+        let v: serde_json::Value = serde_json::from_str(&payload).unwrap_or_default();
+        out.entry(thread).or_default().extend(asks(&kind, &v));
+    }
+    out
+}
+
+/// A pending request as lines: its questions and their choices, or what it wants approved.
+fn asks(kind: &str, v: &serde_json::Value) -> Vec<String> {
+    if let Some(qs) = find(v, "questions").and_then(|q| q.as_array()).filter(|q| !q.is_empty()) {
+        return qs
+            .iter()
+            .map(|q| {
+                let text = q["question"].as_str().or(q["header"].as_str()).unwrap_or("a question").trim().to_string();
+                let options: Vec<&str> = q["options"].as_array().into_iter().flatten().filter_map(|o| o["label"].as_str()).collect();
+                if options.is_empty() {
+                    text
+                } else {
+                    format!("{text} ({})", options.join(" / "))
+                }
+            })
+            .collect();
+    }
+    let what = ["command", "detail", "title", "reason"].iter().find_map(|k| find(v, k).and_then(|c| c.as_str()).filter(|c| !c.trim().is_empty()));
+    let kind = if kind == "user_input" { "an answer" } else { "your approval" };
+    vec![match what {
+        Some(w) => format!("wants {kind}: {}", w.trim()),
+        None => format!("wants {kind}"),
+    }]
+}
+
+/// The first value under `key` anywhere in `v`.
+fn find<'a>(v: &'a serde_json::Value, key: &str) -> Option<&'a serde_json::Value> {
+    match v {
+        serde_json::Value::Object(m) => m.get(key).or_else(|| m.values().find_map(|c| find(c, key))),
+        serde_json::Value::Array(a) => a.iter().find_map(|c| find(c, key)),
+        _ => None,
+    }
+}
+
 /// The T3 thread a Claude Code session is, by the session's id: its address and title.
 /// T3 keeps it after the session's process is gone, so a done thread is found too.
 pub fn thread_of_session(session: &str) -> Option<(String, String)> {
@@ -449,6 +502,17 @@ pub fn fuzzy(pattern: &str, text: &str) -> Option<(i32, Vec<usize>)> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_pending_request_reads_as_its_questions_or_what_it_wants() {
+        let ask = serde_json::json!({ "request": { "questions": [
+            { "header": "Merge", "question": "Merge it now?", "options": [{ "label": "Yes" }, { "label": "Wait" }] },
+            { "header": "Notes", "question": "Anything else?", "options": [] },
+        ] } });
+        assert_eq!(super::asks("user_input", &ask), ["Merge it now? (Yes / Wait)", "Anything else?"]);
+        let run = serde_json::json!({ "request": { "command": "rm -rf build" } });
+        assert_eq!(super::asks("command", &run), ["wants your approval: rm -rf build"]);
+    }
+
     use super::*;
 
     #[test]

@@ -66,6 +66,21 @@ pub fn link(address: &str) -> Option<String> {
     links().lock().ok()?.get(address).cloned()
 }
 
+/// What each thread waits on you for, by id: its questions and approvals.
+fn waiting() -> &'static Mutex<HashMap<String, Vec<String>>> {
+    static WAITING: OnceLock<Mutex<HashMap<String, Vec<String>>>> = OnceLock::new();
+    WAITING.get_or_init(Default::default)
+}
+
+/// What the thread waits on you for, as T3's database said when last read: a
+/// turn to end its conversation with, as T3 shows it, until you answer in T3.
+pub fn waits_turn(address: &str) -> Option<crate::claude::Turn> {
+    let asks = waiting().lock().ok()?.get(address)?.clone();
+    let lines: Vec<String> = asks.iter().map(|a| format!("- {a}")).collect();
+    let text = format!("**Waiting on you.** Answer in T3 (w opens it):\n\n{}", lines.join("\n"));
+    Some(crate::claude::Turn { who: crate::claude::Who::Claude, text, at: 0, times: 1, agent: None })
+}
+
 /// Each thread's open MRs, by id, as (repository, number).
 fn mrs() -> &'static Mutex<HashMap<String, Vec<(String, u64)>>> {
     static MRS: OnceLock<Mutex<HashMap<String, Vec<(String, u64)>>>> = OnceLock::new();
@@ -130,6 +145,7 @@ impl Reader {
         };
         let now = jiff::Timestamp::now().as_second();
         let pids = claude_pids();
+        let waits = crate::finder::pending();
         let mut found = HashMap::new();
         let mut opened = HashMap::new();
         let agents = list
@@ -152,7 +168,9 @@ impl Reader {
                 let open: Vec<(String, u64)> = open.filter_map(|p| Some((p["repository"].as_str()?.to_string(), p["number"].as_u64()?))).collect();
                 opened.insert(id.clone(), open);
                 let shown = self.show(&id, &updated, status == "running");
+                let asks = waits.get(&id);
                 let status = match status {
+                    _ if asks.is_some() => Status::Blocked,
                     "running" => Status::Working,
                     _ if shown.pending > 0 => Status::Blocked,
                     "failed" | "error" => Status::Blocked,
@@ -160,7 +178,11 @@ impl Reader {
                 };
                 Some(Agent {
                     name: t["title"].as_str().unwrap_or(&id).to_string(),
-                    said: if shown.pending > 0 { "waits on your answer".into() } else { String::new() },
+                    said: match asks.and_then(|a| a.first()) {
+                        Some(a) => format!("asks you: {a}"),
+                        None if shown.pending > 0 => "waits on your answer".into(),
+                        None => String::new(),
+                    },
                     status,
                     at,
                     pid: pids.get(&id).copied(),
@@ -174,6 +196,9 @@ impl Reader {
         }
         if let Ok(mut m) = mrs().lock() {
             *m = opened;
+        }
+        if let Ok(mut w) = waiting().lock() {
+            *w = waits;
         }
         agents
     }
