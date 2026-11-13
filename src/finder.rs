@@ -1,5 +1,6 @@
-//! Finding any T3 thread, as T3's ctrl+k does: titles matched fuzzily as you type, and
-//! the words of their messages. Read straight from T3's database, read-only.
+//! Finding any T3 thread or open MR of yours, as T3's ctrl+k does: titles matched
+//! fuzzily as you type, and the words of threads' messages. Read straight from T3's database, read-only.
+use crate::model::Mr;
 use rusqlite::{Connection, OpenFlags};
 use std::collections::{HashMap, HashSet};
 
@@ -20,11 +21,18 @@ pub struct Thread {
     pub settled: bool,
 }
 
-/// A row of the list: its thread, the title's characters that matched, and the
+/// What a row is: one of your open MRs, or a thread, by its place in the finder's lists.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Of {
+    Mr(usize),
+    Thread(usize),
+}
+
+/// A row of the list: what it is, the label's characters that matched, and the
 /// message text that matched when the title didn't.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Row {
-    pub thread: usize,
+    pub of: Of,
     pub marks: Vec<usize>,
     pub hit: Option<Hit>,
 }
@@ -42,9 +50,16 @@ pub struct Said {
     pub text: String,
 }
 
+/// What the cursor is on.
+pub enum Picked<'a> {
+    Mr(&'a Mr),
+    Thread(&'a Thread),
+}
+
 pub struct Finder {
     db: Option<Connection>,
     pub threads: Vec<Thread>,
+    pub mrs: Vec<Mr>,
     pub query: String,
     pub rows: Vec<Row>,
     pub at: usize,
@@ -52,13 +67,20 @@ pub struct Finder {
     pub error: Option<String>,
 }
 
+/// How an MR reads in the list, and what its title is matched as: "!123 Fix the thing".
+pub fn mr_label(m: &Mr) -> String {
+    format!("!{} {}", m.iid, m.title)
+}
+
 impl Finder {
-    pub fn open() -> Finder {
+    /// Over `mrs`, your open MRs, and every T3 thread.
+    pub fn open(mut mrs: Vec<Mr>) -> Finder {
         let (db, threads, error) = match connect().and_then(|db| threads(&db).map(|t| (db, t))) {
             Ok((db, t)) => (Some(db), t, None),
             Err(e) => (None, vec![], Some(e)),
         };
-        let mut f = Finder { db, threads, query: String::new(), rows: vec![], at: 0, previews: HashMap::new(), error };
+        mrs.sort_by_key(|m| std::cmp::Reverse(m.updated));
+        let mut f = Finder { db, threads, mrs, query: String::new(), rows: vec![], at: 0, previews: HashMap::new(), error };
         f.search();
         f
     }
@@ -68,29 +90,31 @@ impl Finder {
         let terms: Vec<&str> = self.query.split_whitespace().collect();
         self.at = 0;
         if terms.is_empty() {
-            self.rows = (0..self.threads.len()).map(|thread| Row { thread, marks: vec![], hit: None }).collect();
+            let mrs = (0..self.mrs.len()).map(Of::Mr);
+            let threads = (0..self.threads.len()).map(Of::Thread);
+            self.rows = mrs.chain(threads).map(|of| Row { of, marks: vec![], hit: None }).collect();
             return;
         }
-        let mut scored: Vec<(i32, Row)> = self
-            .threads
-            .iter()
-            .enumerate()
-            .filter_map(|(i, t)| {
-                let (score, marks) = fuzzy_all(&terms, &t.title)?;
-                Some((score, Row { thread: i, marks, hit: None }))
-            })
-            .collect();
-        // Ties go to the newer, which threads are already in.
-        scored.sort_by_key(|(s, r)| (-s, r.thread));
+        let mrs = self.mrs.iter().enumerate().filter_map(|(i, m)| {
+            let (score, marks) = fuzzy_all(&terms, &mr_label(m)).or_else(|| fuzzy_all(&terms, &m.source).map(|(s, _)| (s - 20, vec![])))?;
+            Some((score, Row { of: Of::Mr(i), marks, hit: None }))
+        });
+        let threads = self.threads.iter().enumerate().filter_map(|(i, t)| {
+            let (score, marks) = fuzzy_all(&terms, &t.title)?;
+            Some((score, Row { of: Of::Thread(i), marks, hit: None }))
+        });
+        let mut scored: Vec<(i32, Row)> = mrs.chain(threads).collect();
+        // Ties go to MRs, then the newer, which each list is already in.
+        scored.sort_by_key(|(s, r)| (-s, r.of));
         let mut rows: Vec<Row> = scored.into_iter().map(|(_, r)| r).collect();
         if let Some(db) = &self.db {
             let by_id: HashMap<&str, usize> = self.threads.iter().enumerate().map(|(i, t)| (t.id.as_str(), i)).collect();
-            let mut seen: HashSet<usize> = rows.iter().map(|r| r.thread).collect();
+            let mut seen: HashSet<Of> = rows.iter().map(|r| r.of).collect();
             for (id, you, text) in message_hits(db, &terms).unwrap_or_default() {
                 let Some(&i) = by_id.get(id.as_str()) else { continue };
-                if seen.insert(i) {
+                if seen.insert(Of::Thread(i)) {
                     let snippet = snippet(&text, &terms);
-                    rows.push(Row { thread: i, marks: vec![], hit: Some(Hit { you, text, snippet }) });
+                    rows.push(Row { of: Of::Thread(i), marks: vec![], hit: Some(Hit { you, text, snippet }) });
                 }
             }
         }
@@ -111,13 +135,21 @@ impl Finder {
         self.at = (self.at as isize + by).rem_euclid(n) as usize;
     }
 
-    pub fn picked(&self) -> Option<&Thread> {
-        self.rows.get(self.at).map(|r| &self.threads[r.thread])
+    pub fn item(&self, of: Of) -> Picked<'_> {
+        match of {
+            Of::Mr(i) => Picked::Mr(&self.mrs[i]),
+            Of::Thread(i) => Picked::Thread(&self.threads[i]),
+        }
+    }
+
+    pub fn picked(&self) -> Option<Picked<'_>> {
+        self.rows.get(self.at).map(|r| self.item(r.of))
     }
 
     /// The newest of what was said in the thread under the cursor, read once.
     pub fn preview(&mut self) -> &[Said] {
-        let Some(id) = self.picked().map(|t| t.id.clone()) else { return &[] };
+        let Some(Picked::Thread(t)) = self.picked() else { return &[] };
+        let id = t.id.clone();
         if !self.previews.contains_key(&id) {
             let said = self.db.as_ref().and_then(|db| said(db, &id).ok()).unwrap_or_default();
             self.previews.insert(id.clone(), said);
@@ -331,6 +363,24 @@ mod tests {
         assert!(fuzzy("settle", "$full-send https://linear.app/redo/issue/HELP-1126").is_none());
         assert!(fuzzy("setl", "settle threads").is_some());
         assert!(fuzzy("hlpdsk", "helpdesk api review").is_some());
+    }
+
+    #[test]
+    fn your_mrs_match_by_number_title_or_branch_and_come_first_when_nothing_is_typed() {
+        let mut a = crate::model::fixture::mr(78877, "me", "connor/billing-default", "main");
+        a.title = "Default billing to simple".into();
+        let mut f = Finder { db: None, threads: vec![], mrs: vec![a], query: String::new(), rows: vec![], at: 0, previews: HashMap::new(), error: None };
+        f.threads.push(Thread { id: "t".into(), title: "billing".into(), project: String::new(), branch: String::new(), updated: 0, archived: false, settled: false });
+        f.search();
+        assert_eq!(f.rows.iter().map(|r| r.of).collect::<Vec<_>>(), [Of::Mr(0), Of::Thread(0)]);
+        for q in ["!78877", "78877", "simple", "billing-def"] {
+            f.query = q.into();
+            f.search();
+            assert!(f.rows.iter().any(|r| r.of == Of::Mr(0)), "{q}");
+        }
+        f.query = "!78877".into();
+        f.search();
+        assert_eq!(f.rows[0].marks, [0, 1, 2, 3, 4, 5]);
     }
 
     #[test]

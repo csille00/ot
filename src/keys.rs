@@ -44,6 +44,10 @@ pub enum Act {
     Sidebar,
     NextThread,
     PrevThread,
+    /// The MR panel beside a thread: shown or not, and its diff scrolled.
+    MrPanel,
+    DiffDown,
+    DiffUp,
     /// Open a row's ticket in Linear.
     Ticket,
     /// The music screen.
@@ -137,6 +141,8 @@ pub enum Place {
     Reply,
     /// In the thread list beside a conversation.
     Side,
+    /// Reading a thread that has an MR, shown beside it.
+    ThreadMr,
     /// On the music screen.
     Music,
     /// On a search's results there.
@@ -266,6 +272,10 @@ pub const KEYS: &[Key] = &[
     k("]", "", "the next thread in the list", &[Transcript], Act::NextThread),
     k("[", "", "the thread before in the list", &[Transcript], Act::PrevThread),
     k("b", "", "show or hide the thread list", &[Transcript], Act::Sidebar),
+    k("o", "review", "open the review of the thread's MR", &[ThreadMr], Act::Review),
+    k("ctrl-f", "", "the MR's diff down a page", &[ThreadMr], Act::DiffDown),
+    k("ctrl-b", "", "the MR's diff up a page", &[ThreadMr], Act::DiffUp),
+    k("m", "", "show or hide the thread's MR beside it", &[ThreadMr], Act::MrPanel),
     k("j", "", "next thread", &[Side], Act::Down),
     k("k", "", "previous thread", &[Side], Act::Up),
     k("down", "", "next thread", &[Side], Act::Down),

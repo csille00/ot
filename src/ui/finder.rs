@@ -1,7 +1,7 @@
 //! The thread finder over whatever is up, laid out as snacks.nvim's picker: the
 //! query and its matches on the left, the thread under the cursor on the right.
-use super::{fg, md, width, Out, AMBER, BAND, DIM, FAINT, GREEN, PINK, TEAL, TEXT};
-use crate::finder::{Finder, Thread};
+use super::{fg, md, width, Out, AMBER, BAND, DIM, FAINT, GREEN, PINK, RED, TEAL, TEXT};
+use crate::finder::{mr_label, Finder, Picked, Thread};
 use crate::hc::Status;
 use crate::model::ago;
 use ratatui::layout::Rect;
@@ -40,14 +40,14 @@ fn frame(title: &str) -> Block<'static> {
 }
 
 fn draw_list(f: &mut Frame, area: Rect, finder: &Finder, status: &HashMap<String, Status>, now: i64) {
-    let block = frame("Threads");
+    let block = frame("Find");
     let inner = block.inner(area);
     f.render_widget(block, area);
     if inner.height < 3 {
         return;
     }
     let w = inner.width as usize;
-    let count = format!("{}/{}", finder.rows.len(), finder.threads.len());
+    let count = format!("{}/{}", finder.rows.len(), finder.threads.len() + finder.mrs.len());
     let mut o = Out::default();
     o.put(" ❯ ", fg(TEAL));
     let room = w.saturating_sub(width(&count) + 5);
@@ -58,7 +58,7 @@ fn draw_list(f: &mut Frame, area: Rect, finder: &Finder, status: &HashMap<String
     f.render_widget(o.line(), Rect { height: 1, ..inner });
     f.render_widget(Line::styled("─".repeat(w), fg(FAINT)), Rect { y: inner.y + 1, height: 1, ..inner });
     let body = Rect { y: inner.y + 2, height: inner.height - 2, ..inner };
-    if let Some(e) = &finder.error {
+    if let (Some(e), true) = (&finder.error, finder.rows.is_empty()) {
         f.render_widget(Paragraph::new(Line::styled(format!(" {e}"), fg(DIM))), body);
         return;
     }
@@ -66,9 +66,31 @@ fn draw_list(f: &mut Frame, area: Rect, finder: &Finder, status: &HashMap<String
     let top = finder.at.saturating_sub(rows.saturating_sub(1));
     let terms: Vec<&str> = finder.query.split_whitespace().collect();
     for (k, row) in finder.rows.iter().enumerate().skip(top).take(rows) {
-        let t = &finder.threads[row.thread];
         let on = k == finder.at;
         let bg = if on { Style::new().bg(BAND) } else { Style::new() };
+        let t = match finder.item(row.of) {
+            Picked::Thread(t) => t,
+            Picked::Mr(m) => {
+                let when = ago(now - m.updated);
+                let mut o = Out::default();
+                o.put(if on { "▌" } else { " " }, bg.fg(AMBER));
+                let color = match m.pipeline.as_str() {
+                    "failed" => RED,
+                    "success" => GREEN,
+                    _ => TEAL,
+                };
+                o.put("⎇", bg.fg(color));
+                o.put(" ", bg);
+                let right = w.saturating_sub(width(&when) + 2);
+                let base = if m.draft { bg.fg(DIM) } else { bg.fg(TEXT) };
+                put_marked(&mut o, &mr_label(m), &row.marks, right.saturating_sub(3), base, bg.fg(AMBER).add_modifier(Modifier::BOLD));
+                pad(&mut o, right + 1, bg);
+                o.put(&when, bg.fg(FAINT));
+                pad(&mut o, w, bg);
+                f.render_widget(o.line(), Rect { y: body.y + (k - top) as u16, height: 1, ..body });
+                continue;
+            }
+        };
         let (glyph, color) = glyph(t, status.get(&t.id).copied());
         let when = ago(now - t.updated);
         let mut o = Out::default();
@@ -102,9 +124,22 @@ fn glyph(t: &Thread, s: Option<Status>) -> (&'static str, ratatui::style::Color)
 }
 
 fn draw_preview(f: &mut Frame, area: Rect, finder: &mut Finder, now: i64) {
-    let Some(t) = finder.picked().cloned() else {
-        f.render_widget(frame("Preview"), area);
-        return;
+    let t = match finder.picked() {
+        None => {
+            f.render_widget(frame("Preview"), area);
+            return;
+        }
+        Some(Picked::Mr(m)) => {
+            let block = frame("Your MR");
+            let inner = block.inner(area);
+            f.render_widget(block, area);
+            let mut lines = super::mr::info(m, inner.width.saturating_sub(2) as usize, now);
+            lines.push(Line::default());
+            lines.push(Line::styled(" enter opens the review", fg(FAINT)));
+            f.render_widget(Paragraph::new(lines), inner);
+            return;
+        }
+        Some(Picked::Thread(t)) => t.clone(),
     };
     let hit = finder.rows.get(finder.at).and_then(|r| r.hit.clone());
     let terms: Vec<String> = finder.query.split_whitespace().map(String::from).collect();

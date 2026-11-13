@@ -268,6 +268,20 @@ pub fn fetch_mr(iid: u64) -> Result<(), String> {
     .map(|_| ())
 }
 
+/// An MR's diff as git prints it, after its `--numstat` and a blank line, fetching its head if it isn't here.
+pub fn patch(iid: u64, base: &str, head: &str) -> Result<String, String> {
+    if base.is_empty() || head.is_empty() {
+        return Err("GitLab hasn't said which commits this MR's diff is between yet".into());
+    }
+    if !have(&[base, head]) {
+        fetch_mr(iid)?;
+    }
+    let range = format!("{base}..{head}");
+    let stat = git(&["diff", "--numstat", "--no-renames", &range], "")?;
+    let diff = git(&["diff", "--no-color", "--no-ext-diff", "--no-renames", "-U3", &range], "")?;
+    Ok(format!("{stat}\n{diff}"))
+}
+
 /// Files bigger than this (2 << 20 is 2 MiB) aren't read: the review says
 /// it can't show them.
 const MOST_BYTES: usize = 2 << 20;

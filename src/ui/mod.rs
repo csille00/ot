@@ -2,6 +2,7 @@
 pub mod board;
 pub mod finder;
 pub mod md;
+pub mod mr;
 pub mod music;
 pub mod session;
 pub mod side;

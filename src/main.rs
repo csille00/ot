@@ -121,6 +121,12 @@ enum Msg {
     },
     /// How something asked of one of hc's agents went, for the note.
     Asked(String),
+    /// An MR's diff at `head`, for the panel beside its thread, or why not.
+    Patch {
+        iid: u64,
+        head: String,
+        result: Result<String, String>,
+    },
     /// A T3 thread's messages, read to show it, or why they couldn't be.
     Thread {
         id: String,
@@ -272,6 +278,17 @@ struct App {
     side: Side,
     /// Each T3 thread's turns as last read, shown at once when you switch back to it.
     read: HashMap<String, Vec<claude::Turn>>,
+    /// The MR panel beside a thread.
+    panel: Panel,
+    /// Each MR's diff as read, by its number, with the head it was read at.
+    patches: HashMap<u64, (String, Result<String, String>)>,
+}
+
+/// The MR panel beside a thread: hidden by m, and how far its diff is scrolled.
+#[derive(Default)]
+struct Panel {
+    hidden: bool,
+    scroll: usize,
 }
 
 /// The thread list beside a conversation: hidden by b, and the thread its cursor
@@ -342,6 +359,8 @@ impl App {
             finder: None,
             side: Side::default(),
             read: HashMap::new(),
+            panel: Panel::default(),
+            patches: HashMap::new(),
         };
         app.rebuild();
         app.view.top(&app.board);
@@ -438,6 +457,9 @@ impl App {
                 let mut at = vec![keys::Place::Transcript];
                 if self.reply_to().is_some() {
                     at.push(keys::Place::Reply);
+                }
+                if self.thread_mr().is_some() {
+                    at.push(keys::Place::ThreadMr);
                 }
                 Some(("session", at))
             }
@@ -988,14 +1010,48 @@ impl App {
         }
     }
 
+    /// The review of `mr` in nvim, on Claude's tour if `tour`.
+    fn review(&mut self, mr: &model::Mr, tour: bool) -> Next {
+        self.reviews_opened += 1;
+        Next::Review(nvim::start(&self.server, &self.cfg.project, mr, &self.snap.me, self.gitlab.clone(), self.reviews_opened, tour))
+    }
+
+    /// Your open MRs, for the finder.
+    fn open_finder(&mut self) {
+        let mine = self.snap.mrs.iter().filter(|m| m.author == self.snap.me && m.reach.is_none()).cloned().collect();
+        self.finder = Some(finder::Finder::open(mine));
+    }
+
     /// Shows a T3 thread, read through T3; what it said when last read until then.
     fn open_thread(&mut self, agent: hc::Agent) {
         if let Some(i) = self.images.as_mut() {
             i.forget();
         }
         let turns = self.read.get(&agent.address).cloned().unwrap_or_default();
+        self.panel.scroll = 0;
         self.shown = Shown::Thread { agent, turns, view: sessionui::View::at_end() };
         self.load_thread();
+    }
+
+    /// The MR of the thread being read: the one it opened, else the one its own branch is.
+    fn thread_mr(&self) -> Option<&model::Mr> {
+        let a = self.reply_to()?;
+        let opened = t3::mr(&a.address, &self.cfg.project).and_then(|iid| self.snap.mr(iid));
+        opened.or_else(|| self.snap.mrs.iter().find(|m| !a.branch.is_empty() && m.source == a.branch && m.reach.is_none()))
+    }
+
+    /// Reads the diff of the thread's MR off the UI thread, once for each head it has.
+    fn ask_patch(&mut self) {
+        let Some(m) = self.thread_mr() else { return };
+        if self.patches.get(&m.iid).is_some_and(|(head, _)| *head == m.head) {
+            return;
+        }
+        let (iid, base, head, tx) = (m.iid, m.base.clone(), m.head.clone(), self.tx.clone());
+        self.patches.insert(iid, (head.clone(), Err("reading the diff…".into())));
+        std::thread::spawn(move || {
+            let result = git::patch(iid, &base, &head);
+            let _ = tx.send(Msg::Patch { iid, head, result });
+        });
     }
 
     /// The T3 threads beside a conversation, newest first, the one being read among them.
@@ -1174,6 +1230,9 @@ fn run(
                     app.agents = agents;
                     app.rebuild();
                 }
+                Msg::Patch { iid, head, result } => {
+                    app.patches.insert(iid, (head, result));
+                }
                 Msg::Thread { id, turns } => {
                     if let Ok(t) = &turns {
                         app.read.insert(id.clone(), t.clone());
@@ -1237,6 +1296,7 @@ fn run(
         }
         app.brief();
         app.tell();
+        app.ask_patch();
         draw(term, app)?;
     }
 }
@@ -1267,8 +1327,7 @@ fn key(app: &mut App, name: &str) -> Next {
         view.said = None;
     }
     if app.finder.is_some() {
-        find_typed(app, name);
-        return Next::Stay;
+        return find_typed(app, name);
     }
     let Some((_, places)) = app.places() else {
         match &app.shown {
@@ -1282,15 +1341,20 @@ fn key(app: &mut App, name: &str) -> Next {
     };
     match &app.shown {
         Shown::Music(_) => music_act(app, act),
+        Shown::Session { .. } | Shown::Thread { .. } if act == Act::Review && app.side.cursor.is_none() => {
+            if let Some(mr) = app.thread_mr().cloned() {
+                return app.review(&mr, false);
+            }
+        }
         Shown::Session { .. } | Shown::Thread { .. } => session_act(app, act),
         Shown::Board => return board_act(app, act),
     }
     Next::Stay
 }
 
-/// A key for the thread finder: moves, enter opens, esc closes, the rest is the query.
-fn find_typed(app: &mut App, name: &str) {
-    let Some(f) = app.finder.as_mut() else { return };
+/// A key for the finder: moves, enter opens, esc closes, the rest is the query.
+fn find_typed(app: &mut App, name: &str) -> Next {
+    let Some(f) = app.finder.as_mut() else { return Next::Stay };
     match name {
         "esc" | "ctrl-c" => app.finder = None,
         "down" | "ctrl-n" | "ctrl-j" => f.step(1),
@@ -1300,7 +1364,15 @@ fn find_typed(app: &mut App, name: &str) {
             f.search();
         }
         "enter" => {
-            let Some(t) = f.picked().cloned() else { return };
+            let t = match f.picked() {
+                None => return Next::Stay,
+                Some(finder::Picked::Mr(m)) => {
+                    let iid = m.iid;
+                    app.finder = None;
+                    return app.snap.mr(iid).cloned().map_or(Next::Stay, |mr| app.review(&mr, false));
+                }
+                Some(finder::Picked::Thread(t)) => t.clone(),
+            };
             app.finder = None;
             let known = app.agents.iter().find(|a| a.address == t.id).cloned();
             let agent = known.unwrap_or(hc::Agent {
@@ -1316,6 +1388,7 @@ fn find_typed(app: &mut App, name: &str) {
         }
         _ => f.typed(name),
     }
+    Next::Stay
 }
 
 /// A paste goes into what you are typing as one line, and nowhere else:
@@ -1451,6 +1524,15 @@ fn session_act(app: &mut App, act: Act) {
             app.side.hidden = !app.side.hidden;
             return;
         }
+        Act::MrPanel => {
+            app.panel.hidden = !app.panel.hidden;
+            return;
+        }
+        Act::DiffDown | Act::DiffUp => {
+            let page = (app.width / 4).max(10);
+            app.panel.scroll = if act == Act::DiffDown { app.panel.scroll + page } else { app.panel.scroll.saturating_sub(page) };
+            return;
+        }
         Act::NextThread | Act::PrevThread => {
             let threads = app.side_threads();
             let reading = app.reply_to().map(|a| a.address);
@@ -1491,7 +1573,7 @@ fn session_act(app: &mut App, act: Act) {
             return;
         }
         Act::Find => {
-            app.finder = Some(finder::Finder::open());
+            app.open_finder();
             return;
         }
         _ => {}
@@ -1670,20 +1752,11 @@ fn board_act(app: &mut App, act: Act) -> Next {
                 return Next::Stay;
             }
             if let Some(mr) = app.picked().cloned() {
-                app.reviews_opened += 1;
-                return Next::Review(nvim::start(
-                    &app.server,
-                    &app.cfg.project,
-                    &mr,
-                    &app.snap.me,
-                    app.gitlab.clone(),
-                    app.reviews_opened,
-                    act == Act::Tour,
-                ));
+                return app.review(&mr, act == Act::Tour);
             }
         }
         Act::Music => app.shown = Shown::Music(musicui::View::default()),
-        Act::Find => app.finder = Some(finder::Finder::open()),
+        Act::Find => app.open_finder(),
         Act::Read => {
             if let Some(Pick::Session(id)) = &app.view.at {
                 if let Some(i) = app.images.as_mut() {
@@ -2034,7 +2107,13 @@ fn draw(term: &mut ratatui::DefaultTerminal, app: &mut App) -> std::io::Result<(
     let places = places_now(&app.places());
     let side_threads = app.side_threads();
     let reading = app.reply_to().map(|a| a.address);
-    let side_shows = app.side_shows(term.size().map_or(0, |s| s.width));
+    let width = term.size().map_or(0, |s| s.width);
+    app.width = width as usize;
+    let side_shows = app.side_shows(width);
+    let mr = app.thread_mr().filter(|_| !app.panel.hidden && width >= 140).cloned();
+    let patch = mr.as_ref().and_then(|m| app.patches.get(&m.iid)).map(|(_, p)| p.clone());
+    let panel = mr.as_ref().map(|m| (m, patch.as_ref()));
+    let panel_scroll = &mut app.panel.scroll;
     if let Shown::Session { id, agent, view } = &mut app.shown {
         // on_sessions keeps the one shown on the board, and a session's
         // agents stay in it.
@@ -2050,8 +2129,14 @@ fn draw(term: &mut ratatui::DefaultTerminal, app: &mut App) -> std::io::Result<(
         let threads = side_threads;
         let side = ui::side::Side { threads: &threads, reading: reading.as_deref(), cursor: app.side.cursor.as_deref() };
         return term.draw(|f| {
-            let area = f.area();
-            if side_shows {
+            let mut area = f.area();
+            if let Some((m, patch)) = panel {
+                let w = (area.width * 2 / 5).max(50);
+                let at = ratatui::layout::Rect { x: area.right() - w, width: w, ..area };
+                ui::mr::panel(f, at, m, patch, panel_scroll, now);
+                area.width -= w;
+            }
+            if side_shows && area.width >= ui::side::FROM {
                 let w = ui::side::WIDTH.min(area.width / 3);
                 ui::side::draw(f, ratatui::layout::Rect { width: w, ..area }, &side, now);
                 let rest = ratatui::layout::Rect { x: area.x + w + 1, width: area.width - w - 1, ..area };
@@ -2080,8 +2165,14 @@ fn draw(term: &mut ratatui::DefaultTerminal, app: &mut App) -> std::io::Result<(
         let threads = side_threads;
         let side = ui::side::Side { threads: &threads, reading: reading.as_deref(), cursor: app.side.cursor.as_deref() };
         return term.draw(|f| {
-            let area = f.area();
-            if side_shows {
+            let mut area = f.area();
+            if let Some((m, patch)) = panel {
+                let w = (area.width * 2 / 5).max(50);
+                let at = ratatui::layout::Rect { x: area.right() - w, width: w, ..area };
+                ui::mr::panel(f, at, m, patch, panel_scroll, now);
+                area.width -= w;
+            }
+            if side_shows && area.width >= ui::side::FROM {
                 let w = ui::side::WIDTH.min(area.width / 3);
                 ui::side::draw(f, ratatui::layout::Rect { width: w, ..area }, &side, now);
                 let rest = ratatui::layout::Rect { x: area.x + w + 1, width: area.width - w - 1, ..area };
