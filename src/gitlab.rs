@@ -393,27 +393,19 @@ impl GitLab {
         })
     }
 
-    /// The MR's description and every discussion on it. Every push and
-    /// approval is a discussion too, oldest first, so a busy MR's newest
-    /// threads are pages in.
+    /// The MR's description and every discussion on it, from GitLab's REST API: its
+    /// GraphQL now answers with no discussions. Every push and approval is a discussion
+    /// too, oldest first, so a busy MR's newest threads are pages in.
     fn discussions(&self, project: &str, iid: u64) -> Result<(String, Vec<Discussion>), String> {
+        let path = write::mr_path(project, iid);
+        let description = self.rest(Method::Get, &path, &serde_json::Value::Null)?["description"].as_str().unwrap_or_default().to_string();
         let mut all = vec![];
-        let mut description = String::new();
-        let mut after: Option<String> = None;
-        loop {
-            let vars = json!({ "id": project, "iid": iid.to_string(), "after": after });
-            let d: ThreadsData = self.graphql(THREADS, vars)?;
-            let Some(mr) = d.project.and_then(|p| p.merge_request) else {
+        for page in 1.. {
+            let v = self.rest(Method::Get, &format!("{path}/discussions?per_page=100&page={page}"), &serde_json::Value::Null)?;
+            let got = v.as_array().map_or(0, Vec::len);
+            all.extend(v.as_array().into_iter().flatten().map(Discussion::from_rest));
+            if got < 100 {
                 break;
-            };
-            description = mr.description.unwrap_or_default();
-            all.extend(mr.discussions.nodes);
-            match mr.discussions.page_info {
-                PageInfo {
-                    has_next_page: true,
-                    end_cursor: Some(c),
-                } => after = Some(c),
-                _ => break,
             }
         }
         Ok((description, all))
@@ -463,6 +455,40 @@ impl Discussion {
                 })
                 .collect(),
         })
+    }
+}
+
+impl Discussion {
+    /// A discussion as GitLab's REST API gives it: resolved once every note that can
+    /// be is.
+    fn from_rest(v: &serde_json::Value) -> Discussion {
+        let notes: Vec<&serde_json::Value> = v["notes"].as_array().map(|n| n.iter().collect()).unwrap_or_default();
+        let resolvable = notes.iter().any(|n| n["resolvable"].as_bool().unwrap_or(false));
+        let resolved = resolvable && notes.iter().filter(|n| n["resolvable"].as_bool().unwrap_or(false)).all(|n| n["resolved"].as_bool().unwrap_or(false));
+        let s = |x: &serde_json::Value| x.as_str().map(String::from);
+        let line = |x: &serde_json::Value| x.as_u64().map(|l| l as u32);
+        Discussion {
+            id: v["id"].as_str().unwrap_or_default().to_string(),
+            resolved,
+            resolvable,
+            notes: Nodes {
+                nodes: notes
+                    .iter()
+                    .map(|n| NoteNode {
+                        body: n["body"].as_str().unwrap_or_default().to_string(),
+                        system: n["system"].as_bool().unwrap_or(false),
+                        author: Name { username: n["author"]["username"].as_str().unwrap_or_default().to_string() },
+                        position: n.get("position").filter(|p| p.is_object()).map(|p| NotePosition {
+                            new_line: line(&p["new_line"]),
+                            old_line: line(&p["old_line"]),
+                            new_path: s(&p["new_path"]),
+                            old_path: s(&p["old_path"]),
+                            diff_refs: Some(DiffRefs { head_sha: s(&p["head_sha"]), base_sha: s(&p["base_sha"]), start_sha: s(&p["start_sha"]) }),
+                        }),
+                    })
+                    .collect(),
+            },
+        }
     }
 }
 
@@ -529,10 +555,6 @@ struct DraftPosition {
     old_line: Option<u32>,
 }
 
-const THREADS: &str = "query($id: ID!, $iid: String!, $after: String) { project(fullPath: $id) { mergeRequest(iid: $iid) { description
-  discussions(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { id resolved resolvable notes { nodes { body system author { username }
-    position { newLine oldLine newPath oldPath diffRefs { headSha } } } } } } } } }";
-
 const MEMBERS: &str = "query($id: ID!, $after: String) { project(fullPath: $id) {
   projectMembers(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { user { username bot } } } } }";
 
@@ -557,23 +579,6 @@ struct Member {
 struct Person {
     username: String,
     bot: bool,
-}
-
-#[derive(Deserialize)]
-struct ThreadsData {
-    project: Option<ThreadsProject>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ThreadsProject {
-    merge_request: Option<ThreadsMr>,
-}
-
-#[derive(Deserialize)]
-struct ThreadsMr {
-    description: Option<String>,
-    discussions: Page<Discussion>,
 }
 
 #[derive(Deserialize)]
