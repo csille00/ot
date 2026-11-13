@@ -2560,12 +2560,193 @@ code_acts = {
   Leave = leave,
 }
 
+-- C: a conversation with Claude about the change, in a split beside the code.
+-- Claude reads the review checkout, at the MR's head, and is told where you are
+-- in the tour each time you ask. It is kept per MR head, so it is there again
+-- when you come back to the same change.
+local chat = { buf = nil, win = nil, sid = nil, busy = false, key = nil }
+
+local function chat_files()
+  local dir = vim.fn.expand("~/.cache/ot/chat")
+  vim.fn.mkdir(dir, "p")
+  local base = ("%s/%d-%s"):format(dir, S.d.iid, (S.d.head or ""):sub(1, 12))
+  return base .. ".md", base .. ".sid"
+end
+
+local function chat_append(text)
+  if not (chat.buf and api.nvim_buf_is_valid(chat.buf)) then
+    return
+  end
+  vim.bo[chat.buf].modifiable = true
+  local n = api.nvim_buf_line_count(chat.buf)
+  local last = api.nvim_buf_get_lines(chat.buf, n - 1, n, false)[1] or ""
+  local parts = vim.split(text, "\n", { plain = true })
+  parts[1] = last .. parts[1]
+  api.nvim_buf_set_lines(chat.buf, n - 1, n, false, parts)
+  vim.bo[chat.buf].modifiable = false
+  vim.fn.writefile(api.nvim_buf_get_lines(chat.buf, 0, -1, false), (chat_files()))
+  if chat.win and api.nvim_win_is_valid(chat.win) then
+    api.nvim_win_set_cursor(chat.win, { api.nvim_buf_line_count(chat.buf), 0 })
+  end
+end
+
+-- Where you are, for Claude: the tour step you are reading, or the file shown.
+local function chat_where()
+  local i = (S.tourbuf and api.nvim_win_get_buf(S.code) == S.tourbuf and step_here()) or S.step
+  local s = i and S.tour_stops[i]
+  if s then
+    return ("I'm reading step %d of the tour, %q, at %s:%d."):format(i, s.title or "", s.path, s.line)
+  end
+  if S.shown and S.shown.i and S.d.files[S.shown.i] then
+    return ("I'm looking at %s."):format(S.d.files[S.shown.i].path)
+  end
+  return ""
+end
+
+local function chat_prompt(q)
+  local where = chat_where()
+  if chat.sid then
+    return (where ~= "" and (where .. "\n\n") or "") .. q
+  end
+  local d = S.d
+  local t = S.tour or {}
+  local steps = {}
+  for i, st in ipairs(t.steps or {}) do
+    steps[#steps + 1] = ("%d. %s (%s:%d)"):format(i, st.title or "", st.path, st.line)
+  end
+  return table.concat({
+    ("I'm reviewing GitLab MR %s, %q, %s into %s, by %s: %s."):format(d.name, d.title, d.source or "?", d.target or "?", d.author or "?", d.url),
+    ("This directory is a checkout at the MR's head (%s). The change is `git diff %s %s`."):format(d.head or "?", d.base or "?", d.head or "?"),
+    "Its description:\n\n" .. (S.description ~= "" and S.description or "(none)"),
+    t.summary and ("A tour of the change says:\n\n" .. t.summary .. "\n\n" .. table.concat(steps, "\n")) or "",
+    "Answer my questions about this change. Read the code to back what you say, and keep answers short. Don't edit anything.",
+    where,
+    q,
+  }, "\n\n")
+end
+
+local function chat_ask(q)
+  if chat.busy then
+    S.say = { "Claude is still answering", "OtAmber" }
+    render()
+    return
+  end
+  chat_append(("%s## you\n\n%s\n\n## claude\n\n"):format(api.nvim_buf_line_count(chat.buf) > 1 and "\n" or "", q))
+  chat.busy = true
+  local cmd = { "claude", "-p", "--model", "opus", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--strict-mcp-config", "--tools", "Read,Grep,Glob,Bash", "--allowedTools", "Read Grep Glob Bash(git diff:*) Bash(git log:*) Bash(git show:*) Bash(git blame:*)" }
+  if chat.sid then
+    vim.list_extend(cmd, { "--resume", chat.sid })
+  end
+  local pending = ""
+  local function on_line(line)
+    local ok, v = pcall(vim.json.decode, line)
+    if not ok or type(v) ~= "table" then
+      return
+    end
+    if v.session_id and v.session_id ~= chat.sid then
+      chat.sid = v.session_id
+      vim.fn.writefile({ chat.sid }, select(2, chat_files()))
+    end
+    local e = v.type == "stream_event" and v.event or nil
+    if e and e.type == "content_block_delta" and e.delta and e.delta.type == "text_delta" then
+      chat_append(e.delta.text)
+    elseif e and e.type == "content_block_start" and e.content_block and e.content_block.type == "tool_use" then
+      chat_append(("\n_(%s)_\n\n"):format(e.content_block.name))
+    elseif v.type == "result" and v.is_error then
+      chat_append("\n\n**" .. tostring(v.result or "Claude stopped") .. "**")
+    end
+  end
+  vim.system(cmd, {
+    cwd = S.root or vim.fn.getcwd(),
+    stdin = chat_prompt(q),
+    stdout = function(_, data)
+      if not data then
+        return
+      end
+      pending = pending .. data
+      local lines = {}
+      while true do
+        local nl = pending:find("\n", 1, true)
+        if not nl then
+          break
+        end
+        lines[#lines + 1] = pending:sub(1, nl - 1)
+        pending = pending:sub(nl + 1)
+      end
+      vim.schedule(function()
+        for _, l in ipairs(lines) do
+          on_line(l)
+        end
+      end)
+    end,
+  }, function(r)
+    vim.schedule(function()
+      chat.busy = false
+      if r.code ~= 0 and r.stderr and r.stderr ~= "" then
+        chat_append("\n\n**claude: " .. vim.trim(r.stderr) .. "**")
+      end
+      chat_append("\n")
+    end)
+  end)
+end
+
+local function chat_input()
+  vim.ui.input({ prompt = "Ask Claude about " .. S.d.name .. ": " }, function(q)
+    if q and vim.trim(q) ~= "" then
+      chat_ask(vim.trim(q))
+    end
+  end)
+end
+
+local function chat_open()
+  local md, sidf = chat_files()
+  if chat.key ~= md then
+    chat.key, chat.sid = md, nil
+    if chat.buf and api.nvim_buf_is_valid(chat.buf) then
+      api.nvim_buf_delete(chat.buf, { force = true })
+    end
+    chat.buf = nil
+    if vim.fn.filereadable(sidf) == 1 then
+      chat.sid = vim.fn.readfile(sidf)[1]
+    end
+  end
+  if not (chat.buf and api.nvim_buf_is_valid(chat.buf)) then
+    chat.buf = api.nvim_create_buf(false, true)
+    api.nvim_buf_set_name(chat.buf, ("ot://%s/chat"):format(S.d.name))
+    vim.bo[chat.buf].filetype = "markdown"
+    local kept = vim.fn.filereadable(md) == 1 and vim.fn.readfile(md) or { "" }
+    api.nvim_buf_set_lines(chat.buf, 0, -1, false, kept)
+    vim.bo[chat.buf].modifiable = false
+    for _, k in ipairs({ "C", "i", "<CR>" }) do
+      vim.keymap.set("n", k, chat_input, { buffer = chat.buf, nowait = true, desc = "ask Claude" })
+    end
+    vim.keymap.set("n", "q", function()
+      api.nvim_win_close(0, true)
+    end, { buffer = chat.buf, nowait = true, desc = "close the chat" })
+  end
+  if not (chat.win and api.nvim_win_is_valid(chat.win)) then
+    api.nvim_set_current_win(S.code)
+    vim.cmd("rightbelow vsplit")
+    chat.win = api.nvim_get_current_win()
+    api.nvim_win_set_buf(chat.win, chat.buf)
+    api.nvim_win_set_width(chat.win, math.max(50, math.floor(vim.o.columns * 0.35)))
+    vim.wo[chat.win].wrap, vim.wo[chat.win].linebreak = true, true
+    vim.wo[chat.win].number, vim.wo[chat.win].relativenumber = false, false
+    vim.wo[chat.win].winbar = "%#OtDim# chat about " .. S.d.name .. "%=C/i/enter ask  q close "
+  end
+  api.nvim_set_current_win(chat.win)
+  api.nvim_win_set_cursor(chat.win, { api.nvim_buf_line_count(chat.buf), 0 })
+  chat_input()
+end
+
 tour_acts = {
   NextStep = list_acts.NextStep,
   PrevStep = list_acts.PrevStep,
   Into = into_step,
+  Chat = chat_open,
   Leave = leave,
 }
+list_acts.Chat = chat_open
 
 -- The keys that work in a window, one word each, from ot's one table, as
 -- pieces for pack().

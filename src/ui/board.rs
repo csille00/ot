@@ -1,7 +1,7 @@
 //! The board: your MRs and the ones you review as a tree, the row under the
 //! cursor in full below it, and the keys that work there.
 use super::music::{Hills, DEEPEST};
-use super::{ask, fg, keys as key_line, pack, put, tone, typed, width, wrap, Out, AMBER, BAND, DIM, FAINT, GREEN, TEAL, TEXT};
+use super::{ask, fg, keys as key_line, pack, put, tone, typed, width, wrap, Out, AMBER, BAND, DIM, FAINT, GREEN, RED, TEAL, TEXT};
 use crate::keys::{self, Act, Place};
 use crate::land::{Landing, Said};
 use crate::claude::State;
@@ -285,6 +285,17 @@ pub struct Screen<'a> {
     /// What cliamp plays, and its bars.
     pub playing: Option<&'a Playing>,
     pub hills: &'a Hills,
+    /// The tours read ahead (l then T), by MR.
+    pub tours: &'a HashMap<u64, Toured>,
+}
+
+/// A tour read ahead of opening the review.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Toured {
+    /// Claude is writing it, this many steps in.
+    Reading(usize),
+    Ready,
+    Failed(String),
 }
 
 /// What is being done to an MR: a word for its row ("merging"), and for a
@@ -863,6 +874,20 @@ fn row(
         if first {
             o.pad_to(cols.move_col.max(o.w + 2));
             o.put(&word, fg(word_fg));
+            let tour = match &r.item {
+                Item::Mr { iid, .. } => match s.tours.get(iid) {
+                    Some(Toured::Reading(0)) => Some(("touring…".to_string(), AMBER)),
+                    Some(Toured::Reading(n)) => Some((format!("touring {n}…"), AMBER)),
+                    Some(Toured::Ready) => Some(("◆ tour".to_string(), TEAL)),
+                    Some(Toured::Failed(_)) => Some(("no tour".to_string(), RED)),
+                    None => None,
+                },
+                _ => None,
+            };
+            if let Some((tag, color)) = tour {
+                o.pad_to(cols.right.saturating_sub(width(&iid) + width(&tag) + 2).max(o.w + 1));
+                o.put(&tag, fg(color));
+            }
             o.pad_to(cols.right.saturating_sub(width(&iid)).max(o.w + 2));
             o.put(&iid, fg(DIM));
         }
@@ -1203,6 +1228,7 @@ mod tests {
             now: fixture::NOW,
             playing: None,
             hills: &Hills::default(),
+            tours: &HashMap::new(),
         };
         t.draw(|f| draw(f, &s, &mut v)).unwrap();
         crate::ui::text(&t)

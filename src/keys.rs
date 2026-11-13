@@ -15,6 +15,7 @@ pub enum Act {
     Unfold,
     Fold,
     Hide,
+    Chat,
     ShowHidden,
     Link,
     /// Copy a symbol and its path from the repo root: "total in src/sum.ts".
@@ -251,6 +252,7 @@ pub const KEYS: &[Key] = &[
     k("n", "next step", "the next step", &[Tour], Act::NextStep),
     k("p", "previous", "the step before", &[Tour], Act::PrevStep),
     k("enter", "its code", "into the file, at the step you are reading", &[Tour], Act::Into),
+    k("C", "chat", "talk with Claude about the change, in a split beside it; it reads the code at the MR's head", &[Tour, List], Act::Chat),
     k("q", "", "back to the board", &[Tour], Act::Leave),
     k("<leader>mn", "", "back to the tour, at its next step", &[Code], Act::NextStep),
     k("<leader>mp", "", "back to the tour, at the step you came from", &[Code], Act::PrevStep),

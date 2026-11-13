@@ -546,7 +546,7 @@ fn toured(gitlab: &Shared, project: &str, mr: &Mr, r: &Review, at: &Path) -> Val
         write_json(at, &v);
     };
     reading(&tour::Tour::default());
-    let run = cache::tour_dir(project).join(format!("{}-{}", mr.base, mr.head));
+    let run = tour::run_dir(project, mr);
     let tour = gitlab
         .get()
         .and_then(|g| g.description(project, mr.iid))
@@ -738,6 +738,10 @@ pub fn shown(
         "title": mr.title,
         "url": mr.url,
         "author": mr.author,
+        "base": mr.base,
+        "head": mr.head,
+        "source": mr.source,
+        "target": mr.target,
         "mine": mine,
         "pipeline": mr.pipeline,
         "failed_jobs": mr.failed_jobs,

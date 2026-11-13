@@ -151,6 +151,16 @@ pub fn read(mr: &Mr, description: &str, r: &Review, run: &Path, told: &mut dyn F
     Ok(tour)
 }
 
+/// Where the tour of `mr`'s change as it is now is kept.
+pub fn run_dir(project: &str, mr: &Mr) -> PathBuf {
+    crate::cache::tour_dir(project).join(format!("{}-{}", mr.base, mr.head))
+}
+
+/// Whether the tour kept in `run` is told and whole, so it opens at once.
+pub fn told(run: &Path) -> bool {
+    kept(run).is_some()
+}
+
 /// What Claude said the last time it was asked in `run`, unless it failed.
 fn kept(run: &Path) -> Option<Value> {
     let all: Value = serde_json::from_slice(&std::fs::read(run.join("claude.json")).ok()?).ok()?;

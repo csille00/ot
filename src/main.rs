@@ -130,6 +130,8 @@ enum Msg {
     Asked(String),
     /// The reply's nvim, in its box over ot, drew; or, true, has exited.
     Popup(bool),
+    /// How a tour read ahead for `iid` at `head` is coming along.
+    Toured { iid: u64, head: String, state: boardui::Toured },
     /// Files dropped on the reply were copied from the Mac (how many), or why not.
     Dropped { text: String, got: Result<usize, String> },
     /// A T3 thread started with `text`, its id, or why it wasn't.
@@ -270,6 +272,8 @@ struct App {
     was_on: HashMap<u64, u64>,
     /// The MRs you hid from the board (h), kept across runs.
     hidden: HashSet<u64>,
+    /// Tours read ahead (l then T), and ones already kept, by MR.
+    tours: HashMap<u64, boardui::Toured>,
     /// What Claude has been asked to read this run, by the heads of the
     /// landing's MRs: once per version of a landing, so one it couldn't
     /// read waits for each deploy until a push or ot's next start.
@@ -376,6 +380,7 @@ impl App {
             landings,
             was_on,
             hidden,
+            tours: HashMap::new(),
             asked: HashSet::new(),
             tried: HashSet::new(),
             merges_sent: HashSet::new(),
@@ -536,6 +541,7 @@ impl App {
             Ok(snap) => {
                 self.snap = snap;
                 self.error = None;
+                self.tours_kept();
                 let was_on = model::remember(&self.was_on, &self.snap);
                 if was_on != self.was_on {
                     self.was_on = was_on;
@@ -1026,6 +1032,52 @@ impl App {
         }
     }
 
+    /// Claude's tour of `iid`, read in the background so the review opens on it
+    /// at once; the board says how it comes along.
+    fn read_tour(&mut self, iid: u64) {
+        let Some(mr) = self.snap.mr(iid).cloned() else { return };
+        match self.tours.get(&iid) {
+            Some(boardui::Toured::Ready) => {
+                self.note = Some(format!("the tour of {} is ready; enter opens it", model::bang(iid)));
+                return;
+            }
+            Some(boardui::Toured::Reading(_)) => return,
+            _ => {}
+        }
+        self.tours.insert(iid, boardui::Toured::Reading(0));
+        self.note = Some(format!("reading the tour of {} in the background", model::bang(iid)));
+        let (tx, project, gitlab) = (self.tx.clone(), self.cfg.project.clone(), self.gitlab.clone());
+        std::thread::spawn(move || {
+            let head = mr.head.clone();
+            let send = |state| {
+                let _ = tx.send(Msg::Toured { iid, head: head.clone(), state });
+            };
+            let have = if git::have(&[&mr.base, &mr.head]) { Ok(()) } else { git::fetch_mr(mr.iid) };
+            let read = have
+                .and_then(|()| git::sides(&mr.base, &mr.head))
+                .map(|sides| review::review(&sides))
+                .and_then(|r| {
+                    let description = gitlab.get().and_then(|g| g.description(&project, mr.iid))?;
+                    tour::read(&mr, &description, &r, &tour::run_dir(&project, &mr), &mut |t| send(boardui::Toured::Reading(t.steps.len())))
+                });
+            send(match read {
+                Ok(_) => boardui::Toured::Ready,
+                Err(e) => boardui::Toured::Failed(e),
+            });
+        });
+    }
+
+    /// Which MRs already have their tour kept, so the board says so after a restart.
+    fn tours_kept(&mut self) {
+        let project = self.cfg.project.clone();
+        self.tours.retain(|iid, t| *t != boardui::Toured::Ready || self.snap.mr(*iid).is_some_and(|m| tour::told(&tour::run_dir(&project, m))));
+        for m in &self.snap.mrs {
+            if !self.tours.contains_key(&m.iid) && m.reach.is_none() && tour::told(&tour::run_dir(&project, m)) {
+                self.tours.insert(m.iid, boardui::Toured::Ready);
+            }
+        }
+    }
+
     /// Hides the picked MR's stack from the board, or brings back a hidden one.
     fn hide(&mut self) {
         let Some(iid) = self.picked().map(|m| m.iid) else { return };
@@ -1321,6 +1373,16 @@ fn run(
                     app.agents = agents;
                     app.rebuild();
                     app.read_said();
+                }
+                Msg::Toured { iid, head, state } => {
+                    if app.snap.mr(iid).is_some_and(|m| m.head == head) {
+                        if let boardui::Toured::Failed(e) = &state {
+                            app.note = Some(format!("no tour of {}: {e}", model::bang(iid)));
+                        } else if state == boardui::Toured::Ready {
+                            app.note = Some(format!("the tour of {} is ready; enter opens it", model::bang(iid)));
+                        }
+                        app.tours.insert(iid, state);
+                    }
                 }
                 Msg::Popup(false) => {}
                 Msg::Popup(true) => {
@@ -2051,6 +2113,10 @@ fn answer(app: &mut App, name: &str) {
                         app.note = term::open(&m.url);
                     }
                 }
+                "T" => {
+                    app.read_tour(iid);
+                    return;
+                }
                 "y" => {
                     if let Some(m) = app.snap.mr(iid) {
                         term::copy(&m.url);
@@ -2151,7 +2217,8 @@ fn board_act(app: &mut App, act: Act) -> Next {
                 return Next::Stay;
             }
             if let Some(mr) = app.picked().cloned() {
-                return app.review(&mr, act == Act::Tour);
+                let ready = app.tours.get(&mr.iid) == Some(&boardui::Toured::Ready);
+                return app.review(&mr, act == Act::Tour || ready);
             }
         }
         Act::Music => app.shown = Shown::Music(musicui::View::default()),
@@ -2656,6 +2723,7 @@ fn draw(term: &mut ratatui::DefaultTerminal, app: &mut App) -> std::io::Result<(
             now: jiff::Timestamp::now().as_second(),
             playing: app.playing.as_ref(),
             hills: &app.hills,
+            tours: &app.tours,
         };
         boardui::draw(f, &s, &mut app.view);
         if let Mode::Blurb { iid, text, scroll } = &mut app.view.mode {
