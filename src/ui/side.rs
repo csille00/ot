@@ -44,10 +44,14 @@ pub fn draw(f: &mut Frame, area: Rect, s: &Side, now: i64) {
     // then a blank line.
     let room = w.saturating_sub(3 + 5);
     let lines: Vec<Vec<(String, Style)>> = s.threads.iter().map(|a| entry(a, s, room)).collect();
+    // The working threads are at the bottom, so the list keeps its end in view,
+    // scrolling up only as far as it must for the thread marked.
+    let fits = |from: usize, to: usize| lines[from..to].iter().map(|l| l.len() + 1).sum::<usize>() <= rows + 1;
     let mut top = 0;
-    while top < at && lines[top..=at].iter().map(|l| l.len() + 1).sum::<usize>() > rows + 1 {
+    while top < lines.len() && !fits(top, lines.len()) {
         top += 1;
     }
+    top = top.min(at);
     let mut y = area.y + 2;
     for (i, a) in s.threads.iter().enumerate().skip(top) {
         if y + lines[i].len() as u16 > area.bottom() {

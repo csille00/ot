@@ -1230,7 +1230,10 @@ impl App {
         });
     }
 
-    /// The T3 threads beside a conversation, newest first, the one being read among them.
+    /// The T3 threads beside a conversation, the one being read among them, as
+    /// T3 lists them: the done ones on top, then those waiting on you, then those
+    /// at work at the bottom; oldest first within each, so the list reads down to
+    /// what is happening now, and its end is what stays in view.
     fn side_threads(&self) -> Vec<hc::Agent> {
         let mut threads: Vec<hc::Agent> = self.agents.iter().filter(|a| t3::owns(&a.address)).cloned().collect();
         if let Some(r) = self.reply_to() {
@@ -1238,7 +1241,7 @@ impl App {
                 threads.push(r);
             }
         }
-        threads.sort_by_key(|a| std::cmp::Reverse(a.at));
+        threads.sort_by_key(|a| (side_rank(a.status), a.at));
         threads
     }
 
@@ -1869,6 +1872,15 @@ fn music_act(app: &mut App, act: Act) {
 }
 
 /// The keys of the thread list beside a conversation, while it has them.
+/// Where a thread of this standing goes in the list beside a conversation.
+fn side_rank(s: hc::Status) -> u8 {
+    match s {
+        hc::Status::Stopped => 0,
+        hc::Status::Blocked => 1,
+        hc::Status::Working => 2,
+    }
+}
+
 fn side_act(app: &mut App, act: Act) {
     let threads = app.side_threads();
     let at = threads.iter().position(|a| Some(&a.address) == app.side.cursor.as_ref()).unwrap_or(0);
