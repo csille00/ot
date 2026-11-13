@@ -12,7 +12,7 @@ local W = vim.fn.strdisplaywidth
 -- Defined at the end, used before: the keys mapped in the list and in a
 -- file's buffer, the line that shows them, the code's winbar, and the
 -- overview's buffer.
-local list_acts, code_acts, player_acts, tour_acts, keys_line, key_words, winbar, overview, tour_page, prose
+local list_acts, code_acts, player_acts, tour_acts, keys_line, key_words, winbar, overview, tour_page, prose, open_thread_pane
 
 -- The one review this nvim shows. Only what the view itself decides lives
 -- here: what is open, which list, where the cursor is.
@@ -2566,6 +2566,139 @@ code_acts = {
   Leave = leave,
 }
 
+-- The T3 thread at work on this MR, its conversation at the right of the
+-- screen, read again every few seconds while it shows; i or enter tells it
+-- something, as replying in T3 does.
+local thread = { buf = nil, win = nil, timer = nil, shown = nil, busy = false }
+
+local function thread_draw(turns)
+  if not (thread.buf and api.nvim_buf_is_valid(thread.buf)) then
+    return
+  end
+  local lines = { "# " .. S.d.thread.name, "" }
+  for _, t in ipairs(turns) do
+    lines[#lines + 1] = t.you and "## you" or "## claude"
+    lines[#lines + 1] = ""
+    vim.list_extend(lines, vim.split(t.text, "\n", { plain = true }))
+    lines[#lines + 1] = ""
+  end
+  local key = table.concat(lines, "\n")
+  if key == thread.shown then
+    return
+  end
+  thread.shown = key
+  -- Follows the end while you are reading there; stays where you scrolled to.
+  local at_end = not (thread.win and api.nvim_win_is_valid(thread.win)) or api.nvim_win_get_cursor(thread.win)[1] >= api.nvim_buf_line_count(thread.buf) - 1
+  vim.bo[thread.buf].modifiable = true
+  api.nvim_buf_set_lines(thread.buf, 0, -1, false, lines)
+  vim.bo[thread.buf].modifiable = false
+  if at_end and thread.win and api.nvim_win_is_valid(thread.win) then
+    api.nvim_win_set_cursor(thread.win, { #lines, 0 })
+  end
+end
+
+local function thread_read()
+  if thread.busy then
+    return
+  end
+  thread.busy = true
+  call({ op = "thread" }, function(a)
+    thread.busy = false
+    if a and a.turns then
+      thread_draw(a.turns)
+    elseif a and a.error and thread.buf and api.nvim_buf_is_valid(thread.buf) then
+      S.say = { "the T3 thread: " .. a.error, "OtAmber" }
+      render()
+    end
+  end)
+end
+
+local function thread_say()
+  vim.ui.input({ prompt = "Tell " .. S.d.thread.name .. ": " }, function(q)
+    if not q or vim.trim(q) == "" then
+      return
+    end
+    S.say = { "telling the thread…", "OtGreen" }
+    render()
+    call({ op = "tell", text = vim.trim(q) }, function(a)
+      if a and a.turns then
+        S.say = { "told " .. S.d.thread.name, "OtGreen" }
+        thread_draw(a.turns)
+      else
+        local why = (a and a.error) or "ot didn't answer"
+        S.say = { why, "OtAmber" }
+        vim.notify("the thread wasn't told: " .. why, vim.log.levels.ERROR)
+      end
+      render()
+    end)
+  end)
+end
+
+local function thread_hide()
+  if thread.timer then
+    thread.timer:stop()
+    thread.timer:close()
+    thread.timer = nil
+  end
+  if thread.win and api.nvim_win_is_valid(thread.win) then
+    api.nvim_win_close(thread.win, true)
+  end
+  thread.win = nil
+end
+
+local function thread_show()
+  if not (S.d and S.d.thread) then
+    S.say = { "no T3 thread works on this MR", "OtAmber" }
+    render()
+    return
+  end
+  if not (thread.buf and api.nvim_buf_is_valid(thread.buf)) then
+    thread.buf = api.nvim_create_buf(false, true)
+    api.nvim_buf_set_name(thread.buf, ("ot://%s/t3"):format(S.d.name))
+    vim.bo[thread.buf].filetype = "markdown"
+    api.nvim_buf_set_lines(thread.buf, 0, -1, false, { "reading the thread…" })
+    vim.bo[thread.buf].modifiable = false
+    for _, k in ipairs({ "i", "<CR>" }) do
+      vim.keymap.set("n", k, thread_say, { buffer = thread.buf, nowait = true, desc = "tell the T3 thread" })
+    end
+    vim.keymap.set("n", "q", thread_hide, { buffer = thread.buf, nowait = true, desc = "hide the T3 thread" })
+  end
+  if not (thread.win and api.nvim_win_is_valid(thread.win)) then
+    local back = api.nvim_get_current_win()
+    vim.cmd("botright vsplit")
+    thread.win = api.nvim_get_current_win()
+    api.nvim_win_set_buf(thread.win, thread.buf)
+    api.nvim_win_set_width(thread.win, math.max(50, math.floor(vim.o.columns * 0.33)))
+    vim.wo[thread.win].wrap, vim.wo[thread.win].linebreak = true, true
+    vim.wo[thread.win].number, vim.wo[thread.win].relativenumber = false, false
+    vim.wo[thread.win].winbar = "%#OtDim# T3 · " .. S.d.thread.name:gsub("%%", "%%%%") .. "%=i/enter tell  q hide "
+    api.nvim_create_autocmd("WinClosed", { pattern = tostring(thread.win), once = true, callback = function()
+      vim.schedule(thread_hide)
+    end })
+    if api.nvim_win_is_valid(back) then
+      api.nvim_set_current_win(back)
+    end
+  end
+  thread.shown = nil
+  thread_read()
+  if not thread.timer then
+    thread.timer = uv.new_timer()
+    thread.timer:start(4000, 4000, vim.schedule_wrap(function()
+      if thread.win and api.nvim_win_is_valid(thread.win) then
+        thread_read()
+      end
+    end))
+  end
+end
+
+local function thread_toggle()
+  if thread.win and api.nvim_win_is_valid(thread.win) then
+    thread_hide()
+  else
+    thread_show()
+  end
+end
+
 -- C: a conversation with Claude about the change, in a split beside the code.
 -- Claude reads the review checkout, at the MR's head, and is told where you are
 -- in the tour each time you ask. It is kept per MR head, so it is there again
@@ -2797,9 +2930,17 @@ tour_acts = {
   PrevStep = list_acts.PrevStep,
   Into = into_step,
   Chat = chat_open,
+  ThreadPane = thread_toggle,
   Leave = leave,
 }
 list_acts.Chat = chat_open
+list_acts.ThreadPane = thread_toggle
+-- An MR a T3 thread works on opens with its conversation beside the code.
+open_thread_pane = function()
+  if S.d and S.d.thread then
+    thread_show()
+  end
+end
 code_acts.ChatAdd = chat_add
 
 -- The keys that work in a window, one word each, from ot's one table, as
@@ -2864,6 +3005,7 @@ local function landed(d)
   api.nvim_buf_set_name(S.listbuf, ("ot://!%d"):format(d.iid))
   map_keys(S.listbuf, "List", list_acts)
   render()
+  vim.schedule(open_thread_pane)
   if S.waiting then
     S.waiting(S.waiting_with)
   end

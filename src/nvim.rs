@@ -19,7 +19,7 @@ use crate::ui::music::Hills;
 use ratatui::style::Color;
 use crate::review::{self, Line, ListRow, Mark, Review, Talk};
 use crate::write::{self, At, Position, Spot, Write, Writer};
-use crate::{cache, git, tour, worktree};
+use crate::{cache, git, t3, tour, worktree};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashSet;
@@ -156,6 +156,9 @@ struct Session {
     at: String,
     /// Its change, once read.
     review: Option<Arc<Review>>,
+    /// The T3 thread at work on the MR, by its address, whose conversation the
+    /// review shows beside the code.
+    thread: Option<String>,
 }
 
 /// Takes nvim's requests on a socket and answers each with what has been
@@ -193,7 +196,7 @@ impl Server {
     }
 
     /// A review opens; its change comes later (attach).
-    fn begin(&self, opened: u64, project: &str, mr: &Mr, mine: bool) {
+    fn begin(&self, opened: u64, project: &str, mr: &Mr, mine: bool, thread: Option<String>) {
         REVIEWING.store(true, Ordering::SeqCst);
         *self.session() = Some(Session {
             opened,
@@ -202,6 +205,7 @@ impl Server {
             mine,
             at: mr.head.clone(),
             review: None,
+            thread,
         });
     }
 
@@ -251,6 +255,15 @@ impl Server {
             let session = session.ok_or("the review is closed")?;
             if let Request::Upload { ref path } = request {
                 return upload(gitlab, &session.project, path);
+            }
+            if let Request::Thread | Request::Tell { .. } = request {
+                let address = session.thread.as_deref().ok_or("no T3 thread works on this MR")?;
+                if let Request::Tell { text } = &request {
+                    t3::send(address, text)?;
+                }
+                let turns = t3::conversation(address)?;
+                let turns: Vec<Value> = turns.iter().map(|t| json!({ "you": t.who == crate::claude::Who::You, "text": t.text })).collect();
+                return Ok(json!({ "turns": turns }));
             }
             if let Some(how) = how {
                 let _one = worktree::CHECKOUT.lock().unwrap_or_else(|e| e.into_inner());
@@ -327,6 +340,12 @@ enum Request {
     Upload {
         path: String,
     },
+    /// The conversation of the MR's T3 thread, as far as it has got.
+    Thread,
+    /// A message to the MR's T3 thread; a busy one gets it as its next turn.
+    Tell {
+        text: String,
+    },
 }
 
 /// A picture or video a body shows, by the path GitLab links it at
@@ -378,7 +397,7 @@ fn writes_for(request: Request, session: &Session, review: &Review) -> Result<Ve
     let iid = mr.iid;
     Ok(match request {
         // serve answers these before the GitLab path; they never get here.
-        Request::Hills { .. } | Request::Amend | Request::Commit { .. } | Request::Upload { .. } => {
+        Request::Hills { .. } | Request::Amend | Request::Commit { .. } | Request::Upload { .. } | Request::Thread | Request::Tell { .. } => {
             unreachable!("not a write to GitLab")
         }
         Request::Comment { body, .. } if body.trim().is_empty() => vec![],
@@ -489,10 +508,11 @@ pub fn start(
     gitlab: Shared,
     opened: u64,
     tour: bool,
+    thread: Option<(String, String)>,
 ) -> Open {
     LATEST.store(opened, Ordering::SeqCst);
     let mine = mr.author == me;
-    server.begin(opened, project, mr, mine);
+    server.begin(opened, project, mr, mine, thread.as_ref().map(|t| t.0.clone()));
     let file = |what: &str| scratch().join(format!("{}-{opened}.{what}.json", mr.iid));
     let open = Open {
         review: file("review"),
@@ -517,10 +537,11 @@ pub fn start(
             Ok(r) => {
                 server.attach(opened, r.clone());
                 let viewed = cache::viewed(&project);
-                write_json(
-                    &review_at,
-                    &shown(r, &mr, mine, &viewed, &cache::viewed_path(&project), &cache::keys_path()),
-                );
+                let mut v = shown(r, &mr, mine, &viewed, &cache::viewed_path(&project), &cache::keys_path());
+                if let Some((address, name)) = &thread {
+                    v["thread"] = json!({ "address": address, "name": name });
+                }
+                write_json(&review_at, &v);
             }
             Err(e) => write_json(&review_at, &json!({ "error": e })),
         }
@@ -1161,6 +1182,7 @@ mod tests {
                 mr,
                 mine,
                 review: None,
+                thread: None,
             },
             review::review(&fixture::sides()),
         )

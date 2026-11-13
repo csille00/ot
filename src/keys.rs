@@ -18,6 +18,7 @@ pub enum Act {
     Chat,
     ReadTour,
     ChatAdd,
+    ThreadPane,
     ShowHidden,
     Link,
     /// Copy a symbol and its path from the repo root: "total in src/sum.ts".
@@ -255,6 +256,7 @@ pub const KEYS: &[Key] = &[
     k("n", "next step", "the next step", &[Tour], Act::NextStep),
     k("p", "previous", "the step before", &[Tour], Act::PrevStep),
     k("enter", "its code", "into the file, at the step you are reading", &[Tour], Act::Into),
+    k("T", "thread", "show or hide the conversation of the T3 thread at work on this MR, at the right; i or enter there tells it something", &[List, Tour], Act::ThreadPane),
     k("<leader>ma", "", "add the lines selected to the chat, for your next question to Claude about them", &[Selection], Act::ChatAdd),
     k("C", "chat", "talk with Claude about the change, in a split beside it; it reads the code at the MR's head", &[Tour, List], Act::Chat),
     k("q", "", "back to the board", &[Tour], Act::Leave),

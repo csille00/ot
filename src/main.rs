@@ -1133,7 +1133,19 @@ impl App {
     /// The review of `mr` in nvim, on Claude's tour if `tour`.
     fn review(&mut self, mr: &model::Mr, tour: bool) -> Next {
         self.reviews_opened += 1;
-        Next::Review(nvim::start(&self.server, &self.cfg.project, mr, &self.snap.me, self.gitlab.clone(), self.reviews_opened, tour))
+        let thread = self.mr_thread(mr);
+        Next::Review(nvim::start(&self.server, &self.cfg.project, mr, &self.snap.me, self.gitlab.clone(), self.reviews_opened, tour, thread))
+    }
+
+    /// The T3 thread at work on `mr`, its address and name: the newest that
+    /// opened it or works on its branch.
+    fn mr_thread(&self, mr: &model::Mr) -> Option<(String, String)> {
+        self.agents
+            .iter()
+            .filter(|a| t3::owns(&a.address))
+            .filter(|a| t3::mr(&a.address, &self.cfg.project) == Some(mr.iid) || (!a.branch.is_empty() && a.branch == mr.source))
+            .max_by_key(|a| a.at)
+            .map(|a| (a.address.clone(), a.name.clone()))
     }
 
     /// Your open MRs, for the finder.
