@@ -42,6 +42,6 @@ pub fn draw(f: &mut Frame, m: &Mr, text: Option<&Result<String, String>>, scroll
     lines.extend(body[*scroll..shown].iter().cloned());
     f.render_widget(Paragraph::new(lines), inner);
     let more = if body.len() > room { format!("{}–{} of {}  ", *scroll + 1, shown, body.len()) } else { String::new() };
-    let keys = format!("{more}j/k scroll  T read the tour ahead  w web  y link  esc closes");
+    let keys = format!("{more}j/k scroll  T prepare the tour  w web  y link  esc closes");
     f.render_widget(Line::styled(keys, Style::new().fg(FAINT)).right_aligned(), Rect { y: inner.bottom().saturating_sub(1), height: 1, ..inner });
 }

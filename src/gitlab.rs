@@ -516,6 +516,30 @@ pub struct Live {
 
 impl Writer for Live {
     fn write(&self, w: &Write) -> Result<(), String> {
+        let done = self.send(w);
+        log_write(w, &done);
+        done
+    }
+}
+
+/// Every write to GitLab and how it went, in ~/.cache/ot/writes.log, so one
+/// that failed out of sight can be looked into.
+fn log_write(w: &Write, done: &Result<(), String>) {
+    use std::io::Write as _;
+    let path = std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".cache/ot/writes.log");
+    let what = format!("{w:?}");
+    let what: String = what.chars().take(300).collect();
+    let how = match done {
+        Ok(()) => "ok".to_string(),
+        Err(e) => format!("FAILED: {e}"),
+    };
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(f, "{}\t{what}\t{how}", jiff::Timestamp::now());
+    }
+}
+
+impl Live {
+    fn send(&self, w: &Write) -> Result<(), String> {
         let g = self.gitlab.get()?;
         match write::call(&self.project, w) {
             Call::Rest { method, path, body } => g.rest(method, &path, &body).map(|_| ()),

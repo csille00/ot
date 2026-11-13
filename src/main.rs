@@ -2219,6 +2219,11 @@ fn board_act(app: &mut App, act: Act) -> Next {
             app.view.settle(&app.board);
         }
         Act::Hide => app.hide(),
+        Act::ReadTour => {
+            if let Some(iid) = app.picked().map(|m| m.iid) {
+                app.read_tour(iid);
+            }
+        }
         // On a row whose rebase is ready, or that its landing says is
         // ready to merge, enter asks about that instead.
         Act::Review | Act::Tour => {

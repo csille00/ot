@@ -1509,6 +1509,9 @@ tour_page = function()
     S.tourbuf = buf
     prose(buf)
     map_keys(buf, "Tour", tour_acts)
+    map_keys(buf, "Selection", { ChatAdd = function()
+      code_acts.ChatAdd()
+    end })
   end
   local info = vim.fn.getwininfo(S.code)[1]
   local w = math.max(20, math.min(84, info.width - info.textoff - 2))
@@ -2171,8 +2174,11 @@ local function send(req, said)
   render()
   call(req, function(answer)
     if not answer or answer.error then
-      S.say = { (answer and answer.error) or "ot didn't answer", "OtAmber" }
+      local why = (answer and answer.error) or "ot didn't answer"
+      S.say = { why, "OtAmber" }
       render()
+      -- Said loudly too, and kept in :messages, since this one didn't go.
+      vim.notify(("%s didn't go: %s"):format(said, why), vim.log.levels.ERROR)
       return
     end
     S.say = { said, "OtGreen" }
@@ -2564,7 +2570,7 @@ code_acts = {
 -- Claude reads the review checkout, at the MR's head, and is told where you are
 -- in the tour each time you ask. It is kept per MR head, so it is there again
 -- when you come back to the same change.
-local chat = { buf = nil, win = nil, sid = nil, busy = false, key = nil }
+local chat = { buf = nil, win = nil, sid = nil, busy = false, key = nil, context = {} }
 
 local function chat_files()
   local dir = vim.fn.expand("~/.cache/ot/chat")
@@ -2605,6 +2611,14 @@ end
 
 local function chat_prompt(q)
   local where = chat_where()
+  if #chat.context > 0 then
+    local parts = { "Here is what I selected to ask about:" }
+    for _, c in ipairs(chat.context) do
+      parts[#parts + 1] = ("From %s:\n```\n%s\n```"):format(c.from, c.text)
+    end
+    chat.context = {}
+    q = table.concat(parts, "\n\n") .. "\n\n" .. q
+  end
   if chat.sid then
     return (where ~= "" and (where .. "\n\n") or "") .. q
   end
@@ -2698,7 +2712,7 @@ local function chat_input()
   end)
 end
 
-local function chat_open()
+local function chat_show()
   local md, sidf = chat_files()
   if chat.key ~= md then
     chat.key, chat.sid = md, nil
@@ -2725,8 +2739,7 @@ local function chat_open()
     end, { buffer = chat.buf, nowait = true, desc = "close the chat" })
   end
   if not (chat.win and api.nvim_win_is_valid(chat.win)) then
-    api.nvim_set_current_win(S.code)
-    vim.cmd("rightbelow vsplit")
+    vim.cmd("botright vsplit")
     chat.win = api.nvim_get_current_win()
     api.nvim_win_set_buf(chat.win, chat.buf)
     api.nvim_win_set_width(chat.win, math.max(50, math.floor(vim.o.columns * 0.35)))
@@ -2736,6 +2749,46 @@ local function chat_open()
   end
   api.nvim_set_current_win(chat.win)
   api.nvim_win_set_cursor(chat.win, { api.nvim_buf_line_count(chat.buf), 0 })
+end
+
+local function chat_open()
+  chat_show()
+  chat_input()
+end
+
+-- <leader>ma on a selection: its lines go to the chat, which opens beside the
+-- code if it isn't open, and asks your question about them.
+local function chat_add()
+  local buf, mode = api.nvim_get_current_buf(), vim.fn.mode()
+  local from_pos, to_pos = vim.fn.getpos("v"), vim.fn.getpos(".")
+  local text = table.concat(vim.fn.getregion(from_pos, to_pos, { type = mode }), "\n")
+  api.nvim_feedkeys(api.nvim_replace_termcodes("<Esc>", true, false, true), "nx", false)
+  local a, b = math.min(from_pos[2], to_pos[2]), math.max(from_pos[2], to_pos[2])
+  local from = "the tour"
+  for f, fb in pairs(S.bufs) do
+    if fb == buf then
+      from = ("%s:%d-%d"):format(S.d.files[f].path, a, b)
+    end
+  end
+  if from == "the tour" and buf ~= S.tourbuf then
+    local name = api.nvim_buf_get_name(buf)
+    local root = S.root and (S.root .. "/")
+    from = ((root and name:sub(1, #root) == root) and name:sub(#root + 1) or name) .. (":%d-%d"):format(a, b)
+  end
+  if vim.trim(text) == "" then
+    return
+  end
+  local back = api.nvim_get_current_win()
+  chat_show()
+  chat.context[#chat.context + 1] = { from = from, text = text }
+  local n = select(2, text:gsub("\n", "")) + 1
+  chat_append(("%s_(added %s, %d line%s, for your next question)_\n"):format(api.nvim_buf_line_count(chat.buf) > 1 and "\n" or "", from, n, n == 1 and "" or "s"))
+  if api.nvim_win_is_valid(back) then
+    api.nvim_set_current_win(back)
+  end
+  S.say = { ("added %s to the chat"):format(from), "OtGreen" }
+  render()
+  -- Straight to the question; esc keeps it for one asked later, with more added.
   chat_input()
 end
 
@@ -2747,6 +2800,7 @@ tour_acts = {
   Leave = leave,
 }
 list_acts.Chat = chat_open
+code_acts.ChatAdd = chat_add
 
 -- The keys that work in a window, one word each, from ot's one table, as
 -- pieces for pack().
