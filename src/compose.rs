@@ -87,7 +87,7 @@ fn nvim_args(c: &Compose) -> Vec<String> {
 /// The same in a floating zellij pane over ot, which returns once the pane closes.
 pub fn zellij(c: &Compose, cwd: &Path) -> Command {
     let mut cmd = Command::new("zellij");
-    cmd.args(["action", "new-pane", "--floating", "--close-on-exit", "--blocking", "--width", "80%", "--height", "70%", "--x", "10%", "--y", "10%"]);
+    cmd.args(["action", "new-pane", "--floating", "--close-on-exit", "--blocking", "--width", "60%", "--height", "45%", "--x", "20%", "--y", "25%"]);
     cmd.arg("--name").arg(format!("reply to {}", c.to.name)).arg("--cwd").arg(cwd).arg("--").arg("nvim").args(nvim_args(c));
     cmd
 }

@@ -50,8 +50,8 @@ else
   vim.bo[bg].bufhidden = "wipe"
   api.nvim_win_set_buf(0, bg)
   api.nvim_win_set_cursor(0, { math.max(1, api.nvim_buf_line_count(bg)), 0 })
-  local w = math.min(100, vim.o.columns - 8)
-  local h = math.max(8, math.floor(vim.o.lines * 0.45))
+  local w = math.min(80, vim.o.columns - 8)
+  local h = math.max(8, math.floor(vim.o.lines * 0.3))
   float = api.nvim_open_win(draft, true, {
     relative = "editor",
     width = w,
