@@ -477,7 +477,7 @@ impl Discussion {
                     .map(|n| NoteNode {
                         body: n["body"].as_str().unwrap_or_default().to_string(),
                         system: n["system"].as_bool().unwrap_or(false),
-                        author: Name { username: n["author"]["username"].as_str().unwrap_or_default().to_string() },
+                        author: Name { username: n["author"]["username"].as_str().unwrap_or_default().to_string(), name: n["author"]["name"].as_str().unwrap_or_default().to_string() },
                         position: n.get("position").filter(|p| p.is_object()).map(|p| NotePosition {
                             new_line: line(&p["new_line"]),
                             old_line: line(&p["old_line"]),
@@ -644,7 +644,7 @@ const SIZES: &str = "query($id: ID!, $iids: [String!]) { project(fullPath: $id) 
   mergeRequests(iids: $iids, first: 100) { nodes { iid diffStatsSummary { additions deletions fileCount } } } } }";
 
 const FRAGMENTS: &str = "
-fragment mr on MergeRequest { iid title draft webUrl author { username } sourceBranch targetBranch detailedMergeStatus mergeError autoMergeEnabled conflicts updatedAt
+fragment mr on MergeRequest { iid title draft webUrl author { username name } sourceBranch targetBranch detailedMergeStatus mergeError autoMergeEnabled conflicts updatedAt
   resolvableDiscussionsCount resolvedDiscussionsCount approved diffHeadSha diffRefs { headSha baseSha startSha }
   approvedBy { nodes { username } } reviewers { nodes { username } }
   headPipeline { id status jobs(statuses: [FAILED], retried: false, first: 50) { nodes { name allowFailure } } } }";
@@ -780,6 +780,8 @@ struct Nodes<T> {
 #[derive(Deserialize)]
 struct Name {
     username: String,
+    #[serde(default)]
+    name: String,
 }
 
 #[derive(Deserialize)]
@@ -876,6 +878,7 @@ impl Node {
             iid: self.iid.parse().unwrap_or(0),
             title: self.title,
             draft: self.draft,
+            author_name: self.author.name,
             author: self.author.username,
             source: self.source_branch,
             target: self.target_branch,

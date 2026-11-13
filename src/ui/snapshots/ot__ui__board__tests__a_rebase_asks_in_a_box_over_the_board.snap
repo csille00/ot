@@ -1,6 +1,7 @@
 ---
 source: src/ui/board.rs
-expression: "frame(100, 30, |_, v|\n{\n    v.mode = Mode::Rebase\n    {\n        iid: 102, ready: Rebased\n        {\n            layers: vec![], said:\n            [(false, \"!102  Change 102\"),\n            (true, \"2 commits onto main, 5 new there\"),\n            (true,\n            \"Claude settled abc1234 in parser.ts: kept main's new error type and raised the parser's errors as it\"),\n            (false,\n            \"it is pushed with a new pipeline; your branch here follows\"),].map(|(detail,\n            text)| Said { detail, text: text.into() }).into(), question:\n            \"rebase it?\".into(), left_out: None, settled: 0,\n        },\n    }\n})"
+assertion_line: 1294
+expression: "frame(100, 30, |_, v|\n{\n    v.mode = Mode::Rebase\n    {\n        iid: 102, ready: Rebased\n        {\n            layers: vec![], said:\n            [(false, \"!102  Change 102\"),\n            (true, \"2 commits onto main, 5 new there\"),\n            (true,\n            \"Claude settled abc1234 in parser.ts: kept main's new error type and raised the parser's errors as it\"),\n            (false,\n            \"it is pushed with a new pipeline; your branch here follows\"),].map(|(detail,\n            text)| Said { detail, text: text.into() }).into(), question:\n            \"rebase it?\".into(), left_out: None, settled: 0, changed: vec![],\n        },\n    }\n})"
 ---
  ot  team/app                                                                           as of 13:44
 
@@ -16,16 +17,16 @@ expression: "frame(100, 30, |_, v|\n{\n    v.mode = Mode::Rebase\n    {\n       
     ├─ ○ q│   raised the parser's errors as it                                           │     !108
     ├─ ◐ l│ it is pushed with a new pipeline; your branch here follows                   │     !109
     │     │                                                                              │
-    ├─ ● a│ rebase it?                                                                   │     !201
-    ├─ ✓ k│                                                                              │     !202
-    │  └─ │ y yes  esc later  n drop it                                                  │     !203
-    │     ╰──────────────────────────────────────────────────────────────────────────────╯
+    │  ale│ rebase it?                                                                   │
+    ├─ ● a│                                                                              │     !201
+    │     │ y yes  esc later  n drop it                                                  │
+    │  kim╰──────────────────────────────────────────────────────────────────────────────╯
+    ├─ ✓ kim/flag-cleanup                                                    you approved      !202
+    │  └─ ● kim/flag-cleanup-two                                             review it         !203
+    │
     └─ ◆ sam/scratch                                                         you are here
 
    claude
-    ◐ A fresh board                                                          working             1m
-    ○ Why the parser's error paths read better apart                         waiting on you     25m
-
  ──────────────────────────────────────────────────────────────────────────────────────────────────
   Split the parser's error paths from its happy path so each reads alone                       !101
   ● rebase it  ·  split from main 6 days ago  ·  stale-check failed  ·  nobody asked to review

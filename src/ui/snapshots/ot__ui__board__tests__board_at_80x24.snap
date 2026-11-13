@@ -18,9 +18,9 @@ expression: "frame(80, 24, |_, _| {})"
     ├─ ○ quiet-but-sent                                  in review         !108
     ├─ ◐ lands-itself                                    merges itself     !109
     │
+    │  alex
     ├─ ● alex/route-table                                review it         !201
-    ├─ ✓ kim/flag-cleanup                                you approved      !202
-    │  └─ ● kim/flag-cleanup-two                         review it         !203
+    │
  ──────────────────────────────────────────────────────────────────────────────
   Split the parser's error paths from its happy path so each reads alone   !101
   ● rebase it  ·  split from main 6 days ago  ·  stale-check failed

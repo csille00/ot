@@ -1,5 +1,6 @@
 ---
 source: src/ui/board.rs
+assertion_line: 1324
 expression: "frame_of((snap, vec![], vec![]), &landing, 100, 30, |_, v|\n{\n    v.at = Some(Pick::Mr(105)); v.mode = Mode::Confirm\n    { iid: 105, plan: model::plan(Act::Merge, &mr).unwrap() };\n})"
 ---
  ot  team/app                                                                           as of 13:44
@@ -16,16 +17,16 @@ expression: "frame_of((snap, vec![], vec![]), &landing, 100, 30, |_, v|\n{\n    
     ├─ ○ q│                                                                              │     !108
     ├─ ◐ l│ y yes  n no                                                                  │     !109
     │     ╰──────────────────────────────────────────────────────────────────────────────╯
+    │  alex
     ├─ ● alex/route-table                                                    review it         !201
+    │
+    │  kim
     ├─ ✓ kim/flag-cleanup                                                    you approved      !202
     │  └─ ● kim/flag-cleanup-two                                             review it         !203
     │
     └─ ◆ sam/scratch                                                         you are here
 
     ▸ 3 not sent
-
-
-
  ──────────────────────────────────────────────────────────────────────────────────────────────────
   Change 105                                                                                   !105
   landing !104, !105: enter merges this one, once you say y; L stops it

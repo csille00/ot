@@ -5,9 +5,9 @@ expression: "frame(80, 24, |b, v| { v.bottom(b); v.fold_open = true; v.bottom(b)
 ---
  ot  team/app                                                       as of 13:44
 
-    ├─ ◐ lands-itself                                    merges itself     !109
-    │
     ├─ ● alex/route-table                                review it         !201
+    │
+    │  kim
     ├─ ✓ kim/flag-cleanup                                you approved      !202
     │  └─ ● kim/flag-cleanup-two                         review it         !203
     │

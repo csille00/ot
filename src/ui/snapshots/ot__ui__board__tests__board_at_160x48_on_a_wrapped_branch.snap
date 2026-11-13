@@ -17,7 +17,10 @@ expression: "frame(160, 48, |b, v| v.step(b, 5))"
     ├─ ○ quiet-but-sent                                                       in review                                                                    !108
     ├─ ◐ lands-itself                                                         merges itself                                                                !109
     │
+    │  alex
     ├─ ● alex/route-table                                                     review it                                                                    !201
+    │
+    │  kim
     ├─ ✓ kim/flag-cleanup                                                     you approved                                                                 !202
     │  └─ ● kim/flag-cleanup-two                                              review it                                                                    !203
     │
@@ -28,9 +31,6 @@ expression: "frame(160, 48, |b, v| v.step(b, 5))"
     ○ Why the parser's error paths read better apart                          waiting on you                                                                25m
 
     ▸ 3 not sent
-
-
-
 
 
 

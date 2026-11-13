@@ -1,5 +1,6 @@
 ---
 source: src/ui/board.rs
+assertion_line: 1370
 expression: "frame_of(fixture::swarm(), &HashMap::new(), 110, 44, |_, v|\n{ v.at = Some(Pick::Ticket(\"AP-4\".into())); })"
 ---
  ot  team/app                                                                                     as of 13:44
@@ -23,7 +24,10 @@ expression: "frame_of(fixture::swarm(), &HashMap::new(), 110, 44, |_, v|\n{ v.at
     │        └─ · Alert on parser slowdowns                                   waits on AP-3        AP-6
   ▌ ├─ ○ Line numbers in parse errors                                         agent waiting        AP-4
     │
+    │  alex
     ├─ ● alex/route-table                                                     review it                  !201
+    │
+    │  kim
     ├─ ✓ kim/flag-cleanup                                                     you approved               !202
     │  └─ ● kim/flag-cleanup-two                                              review it                  !203
     │
@@ -33,9 +37,6 @@ expression: "frame_of(fixture::swarm(), &HashMap::new(), 110, 44, |_, v|\n{ v.at
     ○ Parser migration agents                                                 waiting on you               2m
 
     ▸ 3 not sent
-
-
-
  ────────────────────────────────────────────────────────────────────────────────────────────────────────────
   Line numbers in parse errors                                                                           AP-4
   ○ agent waiting  ·  In Progress  ·  in Parser migration  ·  no MR yet

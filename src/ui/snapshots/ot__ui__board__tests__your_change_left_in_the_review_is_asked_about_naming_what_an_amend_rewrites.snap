@@ -1,5 +1,6 @@
 ---
 source: src/ui/board.rs
+assertion_line: 1344
 expression: "frame(80, 24, |_, v|\n{\n    v.mode =\n    Mode::Unpushed(Left\n    {\n        iid: 102, branch: \"sam/sum\".into(), change: Change\n        {\n            on: \"1a2b3c4d5e\".into(), subject: \"Sum with reduce\".into(), files:\n            vec![\"src/sum.ts\".into(), \"src/total.ts\".into()]\n        }, why:\n        Some(\"GitLab's sam/sum had moved on to 9f8e7d6 \\\"theirs\\\", so nothing was pushed; your change is on it now, for you to look at before it goes\".into()),\n    })\n})"
 ---
  ot  team/app                                                       as of 13:44
@@ -17,9 +18,9 @@ expression: "frame(80, 24, |_, v|\n{\n    v.mode =\n    Mode::Unpushed(Left\n   
     │ on 1a2b3c4 "Sum with reduce"                                         │108
     │                                                                      │109
     │ a amend that  c new commit  d put aside  esc keep it there           │
-    ╰──────────────────────────────────────────────────────────────────────╯201
-    ├─ ✓ kim/flag-cleanup                                you approved      !202
-    │  └─ ● kim/flag-cleanup-two                         review it         !203
+    ╰──────────────────────────────────────────────────────────────────────╯
+    ├─ ● alex/route-table                                review it         !201
+    │
  ──────────────────────────────────────────────────────────────────────────────
   Split the parser's error paths from its happy path so each reads alone   !101
   ● rebase it  ·  split from main 6 days ago  ·  stale-check failed

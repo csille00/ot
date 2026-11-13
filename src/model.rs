@@ -19,6 +19,8 @@ pub struct Mr {
     pub title: String,
     pub draft: bool,
     pub author: String,
+    /// The author's name as GitLab shows it, when GitLab gave it.
+    pub author_name: String,
     pub source: String,
     pub target: String,
     pub url: String,
@@ -728,7 +730,21 @@ pub fn board_hiding(
         group.extend(tops);
         group
     }));
-    groups.push(others.into_iter().map(Top::Stack).collect());
+    // Others' MRs under who asked you to review them, in the order they come.
+    let mut by_author: Vec<(&str, Vec<Top>)> = vec![];
+    for root in others {
+        let m = by_iid[&root];
+        let who = if m.author_name.is_empty() { m.author.as_str() } else { m.author_name.as_str() };
+        match by_author.iter_mut().find(|(a, _)| *a == who) {
+            Some((_, tops)) => tops.push(Top::Stack(root)),
+            None => by_author.push((who, vec![Top::Stack(root)])),
+        }
+    }
+    groups.extend(by_author.into_iter().map(|(who, tops)| {
+        let mut group = vec![Top::Label(who.to_string())];
+        group.extend(tops);
+        group
+    }));
     let rows = RowMaker {
         by_iid: &by_iid,
         keys: &keys,
@@ -1944,7 +1960,10 @@ mod tests {
                 "├─ ○ quiet-but-sent in review !108",
                 "├─ ◐ lands-itself merges itself !109",
                 "│",
+                "│  alex",
                 "├─ ● alex/route-table review it !201",
+                "│",
+                "│  kim",
                 "├─ ✓ kim/flag-cleanup you approved !202",
                 "│  └─ ● kim/flag-cleanup-two review it !203",
                 "│",

@@ -24,7 +24,10 @@ expression: "frame_of(fixture::swarm(), &HashMap::new(), 110, 44, |b, v|\n{ whil
     │        └─ · Alert on parser slowdowns                                   waits on AP-3        AP-6
     ├─ ○ Line numbers in parse errors                                         agent waiting        AP-4
     │
+    │  alex
     ├─ ● alex/route-table                                                     review it                  !201
+    │
+    │  kim
     ├─ ✓ kim/flag-cleanup                                                     you approved               !202
     │  └─ ● kim/flag-cleanup-two                                              review it                  !203
     │
@@ -34,9 +37,6 @@ expression: "frame_of(fixture::swarm(), &HashMap::new(), 110, 44, |b, v|\n{ whil
     ○ Parser migration agents                                                 waiting on you               2m
 
     ▸ 3 not sent
-
-
-
 
  ────────────────────────────────────────────────────────────────────────────────────────────────────────────
   Change 302                                                                                             !302
