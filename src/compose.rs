@@ -56,14 +56,39 @@ pub fn prepare(to: &Agent, turns: &[Turn], plain: bool) -> Result<Compose, Strin
 }
 
 fn conversation(name: &str, turns: &[Turn]) -> String {
+    markdown(name, turns, CONTEXT)
+}
+
+/// The conversation as markdown, its last `most` things said.
+fn markdown(name: &str, turns: &[Turn], most: usize) -> String {
     let mut out = format!("# {name}\n");
     let said: Vec<&Turn> = turns.iter().filter(|t| t.who != Who::Tool).collect();
-    for t in said.iter().skip(said.len().saturating_sub(CONTEXT)) {
+    for t in said.iter().skip(said.len().saturating_sub(most)) {
         out.push_str(if t.who == Who::You { "\n## you\n\n" } else { "\n## claude\n\n" });
         out.push_str(t.text.trim());
         out.push('\n');
     }
     out
+}
+
+/// nvim, read-only and with your config, on the whole conversation as markdown, at
+/// its end: to select, search and yank what was said. Over ssh a yank reaches your
+/// clipboard through OSC 52 unless your config says otherwise.
+pub fn reader(name: &str, turns: &[Turn]) -> Result<Vec<String>, String> {
+    let dir = cache().join("read");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let file: String = name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).take(60).collect();
+    let path = dir.join(format!("{file}.md"));
+    std::fs::write(&path, markdown(name, turns, usize::MAX)).map_err(|e| e.to_string())?;
+    Ok(vec![
+        "-R".into(),
+        "-c".into(),
+        "lua if vim.env.SSH_TTY and vim.g.clipboard == nil then vim.g.clipboard = 'osc52' end".into(),
+        "-c".into(),
+        "setlocal wrap linebreak nomodifiable".into(),
+        "+".into(),
+        path.display().to_string(),
+    ])
 }
 
 /// nvim on the draft, with your config.

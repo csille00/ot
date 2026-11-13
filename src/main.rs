@@ -198,6 +198,8 @@ enum Next {
     Attach(hc::Agent),
     /// The terminal to a shell in this folder, until it exits.
     Shell(PathBuf),
+    /// The terminal to nvim with these arguments, until it quits.
+    Nvim(Vec<String>),
     /// A reply to the agent, written in nvim.
     Compose(hc::Agent),
 }
@@ -1354,6 +1356,13 @@ fn run(
                         Next::Review(open) => review_in_nvim(term, &lend, app, open),
                         Next::Attach(agent) if t3::owns(&agent.address) => app.open_thread(agent),
                         Next::Compose(to) => compose_reply(term, &lend, app, to),
+                        Next::Nvim(args) => {
+                            let mut nvim = Command::new("nvim");
+                            nvim.args(&args);
+                            if let Err(e) = lend_terminal(term, &lend, nvim) {
+                                app.note = Some(e);
+                            }
+                        }
                         Next::Shell(dir) => {
                             let mut sh = Command::new(std::env::var_os("SHELL").unwrap_or_else(|| "bash".into()));
                             sh.current_dir(&dir);
@@ -1420,6 +1429,7 @@ fn key(app: &mut App, name: &str) -> Next {
     match &app.shown {
         Shown::Music(_) => music_act(app, act),
         Shown::Session { .. } | Shown::Thread { .. } if act == Act::Terminal => return terminal(app),
+        Shown::Session { .. } | Shown::Thread { .. } if act == Act::Select => return select(app),
         Shown::Session { .. } | Shown::Thread { .. } if act == Act::Tell && app.side.cursor.is_none() => {
             if let Some(to) = app.reply_to() {
                 return Next::Compose(to);
@@ -1494,6 +1504,45 @@ fn send_composed(app: &mut App, c: compose::Compose) {
         };
         let _ = tx.send(Msg::Asked(how));
     });
+}
+
+/// The conversation being read, in nvim to select and yank from: a floating zellij
+/// pane over ot inside zellij, else this terminal until nvim quits.
+fn select(app: &mut App) -> Next {
+    let (name, turns) = match &app.shown {
+        Shown::Thread { agent, turns, .. } => (agent.name.clone(), turns.clone()),
+        Shown::Session { id, agent: None, .. } => match app.sessions.iter().find(|s| s.id == *id) {
+            Some(s) => (s.title.clone(), s.turns.clone()),
+            None => return Next::Stay,
+        },
+        Shown::Session { id, agent: Some(a), .. } => match app.sessions.iter().find(|s| s.id == *id).and_then(|s| s.agent(a)) {
+            Some(ag) => (a.clone(), ag.turns.clone()),
+            None => return Next::Stay,
+        },
+        _ => return Next::Stay,
+    };
+    let args = match compose::reader(&name, &turns) {
+        Ok(a) => a,
+        Err(e) => {
+            app.note = Some(format!("can't open the conversation in nvim: {e}"));
+            return Next::Stay;
+        }
+    };
+    if std::env::var_os("ZELLIJ").is_none() {
+        return Next::Nvim(args);
+    }
+    let ran = Command::new("zellij")
+        .args(["action", "new-pane", "--floating", "--close-on-exit", "--width", "90%", "--height", "90%", "--x", "5%", "--y", "5%", "--name", &name, "--", "nvim"])
+        .args(&args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output();
+    match ran {
+        Ok(o) if !o.status.success() => app.note = Some(format!("zellij opened no pane: {}", String::from_utf8_lossy(&o.stderr).trim())),
+        Err(e) => app.note = Some(format!("zellij: {e}")),
+        _ => {}
+    }
+    Next::Stay
 }
 
 /// A shell where the session or thread being read works: a zellij pane beside ot

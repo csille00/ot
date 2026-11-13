@@ -16,4 +16,4 @@ expression: "frame_of(0, 80, 14, |_| {})"
              · reading src/main.rs
 
     agent    The fetcher is fine. One note on the writer.                  1m
-  G end  q back  t terminal  tab threads
+  G end  q back  v select  t terminal  tab threads

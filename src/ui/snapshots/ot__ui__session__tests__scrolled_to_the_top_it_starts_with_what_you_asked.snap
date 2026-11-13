@@ -14,4 +14,4 @@ expression: "frame(80, 12, |v| v.top())"
            · searching for ParseError
 
   claude   Three error paths share one match arm with the happy path.      2h
-  G end  q back  t terminal  tab threads
+  G end  q back  v select  t terminal  tab threads
