@@ -2566,128 +2566,137 @@ code_acts = {
   Leave = leave,
 }
 
--- The T3 thread at work on this MR, its conversation at the right of the
--- screen, read again every few seconds while it shows; i or enter tells it
--- something, as replying in T3 does.
-local thread = { buf = nil, win = nil, timer = nil, shown = nil, busy = false }
+-- The panes at the right (the T3 thread, the chat) end as a chat app does:
+-- room under the last message, and a box at the foot saying how to reply, or
+-- that an answer is on its way.
+local PAD = 4
+local foot_ns = api.nvim_create_namespace("ot.foot")
 
-local function thread_draw(turns)
-  if not (thread.buf and api.nvim_buf_is_valid(thread.buf)) then
-    return
-  end
-  local lines = { "# " .. S.d.thread.name, "" }
-  for _, t in ipairs(turns) do
-    lines[#lines + 1] = t.you and "## you" or "## claude"
-    lines[#lines + 1] = ""
-    vim.list_extend(lines, vim.split(t.text, "\n", { plain = true }))
+local function padded(lines)
+  for _ = 1, PAD do
     lines[#lines + 1] = ""
   end
-  local key = table.concat(lines, "\n")
-  if key == thread.shown then
-    return
-  end
-  thread.shown = key
-  -- Follows the end while you are reading there; stays where you scrolled to.
-  local at_end = not (thread.win and api.nvim_win_is_valid(thread.win)) or api.nvim_win_get_cursor(thread.win)[1] >= api.nvim_buf_line_count(thread.buf) - 1
-  vim.bo[thread.buf].modifiable = true
-  api.nvim_buf_set_lines(thread.buf, 0, -1, false, lines)
-  vim.bo[thread.buf].modifiable = false
-  if at_end and thread.win and api.nvim_win_is_valid(thread.win) then
-    api.nvim_win_set_cursor(thread.win, { #lines, 0 })
-  end
+  return lines
 end
 
-local function thread_read()
-  if thread.busy then
+-- The pane at its end: its last line at the bottom, the cursor on the last message.
+local function pane_end(win, buf)
+  if not (win and api.nvim_win_is_valid(win) and buf and api.nvim_buf_is_valid(buf)) then
     return
   end
-  thread.busy = true
-  call({ op = "thread" }, function(a)
-    thread.busy = false
-    if a and a.turns then
-      thread_draw(a.turns)
-    elseif a and a.error and thread.buf and api.nvim_buf_is_valid(thread.buf) then
-      S.say = { "the T3 thread: " .. a.error, "OtAmber" }
-      render()
-    end
+  local total = api.nvim_buf_line_count(buf)
+  api.nvim_win_set_cursor(win, { total, 0 })
+  api.nvim_win_call(win, function()
+    vim.cmd("normal! zb")
   end)
+  api.nvim_win_set_cursor(win, { math.max(1, total - PAD), 0 })
 end
 
-local function thread_say()
-  vim.ui.input({ prompt = "Tell " .. S.d.thread.name .. ": " }, function(q)
-    if not q or vim.trim(q) == "" then
-      return
-    end
-    S.say = { "telling the thread…", "OtGreen" }
-    render()
-    call({ op = "tell", text = vim.trim(q) }, function(a)
-      if a and a.turns then
-        S.say = { "told " .. S.d.thread.name, "OtGreen" }
-        thread_draw(a.turns)
-      else
-        local why = (a and a.error) or "ot didn't answer"
-        S.say = { why, "OtAmber" }
-        vim.notify("the thread wasn't told: " .. why, vim.log.levels.ERROR)
+-- The box at the foot of pane `p` ({ win, foot, footbuf }), saying `text`.
+local function pane_foot(p, text, hl)
+  p.foot_says = { text, hl }
+  if not (p.win and api.nvim_win_is_valid(p.win)) then
+    return
+  end
+  if not (p.footbuf and api.nvim_buf_is_valid(p.footbuf)) then
+    p.footbuf = api.nvim_create_buf(false, true)
+  end
+  local line = " " .. text
+  api.nvim_buf_set_lines(p.footbuf, 0, -1, false, { line })
+  api.nvim_buf_clear_namespace(p.footbuf, foot_ns, 0, -1)
+  api.nvim_buf_set_extmark(p.footbuf, foot_ns, 0, 0, { end_col = #line, hl_group = hl })
+  local w, h = api.nvim_win_get_width(p.win), api.nvim_win_get_height(p.win)
+  local cfg = { relative = "win", win = p.win, row = math.max(0, h - 3), col = 1, width = math.max(10, w - 4), height = 1, style = "minimal", border = "rounded", focusable = false, zindex = 45 }
+  if p.foot and api.nvim_win_is_valid(p.foot) then
+    api.nvim_win_set_config(p.foot, cfg)
+  else
+    p.foot = api.nvim_open_win(p.footbuf, false, cfg)
+    vim.wo[p.foot].winhighlight = "NormalFloat:Normal,FloatBorder:OtDim"
+  end
+end
+
+local function pane_foot_close(p)
+  if p.foot and api.nvim_win_is_valid(p.foot) then
+    api.nvim_win_close(p.foot, true)
+  end
+  p.foot = nil
+end
+
+local panes = {}
+api.nvim_create_autocmd("WinResized", {
+  callback = function()
+    for _, p in ipairs(panes) do
+      if p.foot_says and p.win and api.nvim_win_is_valid(p.win) then
+        pane_foot(p, p.foot_says[1], p.foot_says[2])
       end
-      render()
-    end)
-  end)
-end
+    end
+  end,
+})
+
+-- The T3 thread at work on this MR, at the right of the screen as ot's own
+-- conversation page: ot runs there (`ot thread`), so it reads, replies (s) and
+-- keeps up as the board's page does. ctrl-h goes back to the code.
+local thread = { buf = nil, win = nil, job = nil }
 
 local function thread_hide()
-  if thread.timer then
-    thread.timer:stop()
-    thread.timer:close()
-    thread.timer = nil
-  end
   if thread.win and api.nvim_win_is_valid(thread.win) then
     api.nvim_win_close(thread.win, true)
   end
   thread.win = nil
 end
 
-local function thread_show()
+local function thread_show(focus)
   if not (S.d and S.d.thread) then
     S.say = { "no T3 thread works on this MR", "OtAmber" }
     render()
     return
   end
-  if not (thread.buf and api.nvim_buf_is_valid(thread.buf)) then
-    thread.buf = api.nvim_create_buf(false, true)
-    api.nvim_buf_set_name(thread.buf, ("ot://%s/t3"):format(S.d.name))
-    vim.bo[thread.buf].filetype = "markdown"
-    api.nvim_buf_set_lines(thread.buf, 0, -1, false, { "reading the thread…" })
-    vim.bo[thread.buf].modifiable = false
-    for _, k in ipairs({ "i", "<CR>" }) do
-      vim.keymap.set("n", k, thread_say, { buffer = thread.buf, nowait = true, desc = "tell the T3 thread" })
-    end
-    vim.keymap.set("n", "q", thread_hide, { buffer = thread.buf, nowait = true, desc = "hide the T3 thread" })
-  end
+  local back = api.nvim_get_current_win()
   if not (thread.win and api.nvim_win_is_valid(thread.win)) then
-    local back = api.nvim_get_current_win()
-    vim.cmd("botright vsplit")
+    -- Over the chat when it is open, so the two share the right of the screen.
+    local chat_win = vim.fn.bufwinid(("ot://%s/chat"):format(S.d.name))
+    if chat_win ~= -1 then
+      api.nvim_set_current_win(chat_win)
+      vim.cmd("aboveleft split")
+    else
+      vim.cmd("botright vsplit")
+      api.nvim_win_set_width(0, math.max(56, math.floor(vim.o.columns * 0.36)))
+    end
     thread.win = api.nvim_get_current_win()
-    api.nvim_win_set_buf(thread.win, thread.buf)
-    api.nvim_win_set_width(thread.win, math.max(50, math.floor(vim.o.columns * 0.33)))
-    vim.wo[thread.win].wrap, vim.wo[thread.win].linebreak = true, true
+    vim.wo[thread.win].winbar = "%#OtDim# T3 · " .. S.d.thread.name:gsub("%%", "%%%%") .. "%=ctrl-h back to the code "
     vim.wo[thread.win].number, vim.wo[thread.win].relativenumber = false, false
-    vim.wo[thread.win].winbar = "%#OtDim# T3 · " .. S.d.thread.name:gsub("%%", "%%%%") .. "%=i/enter tell  q hide "
-    api.nvim_create_autocmd("WinClosed", { pattern = tostring(thread.win), once = true, callback = function()
-      vim.schedule(thread_hide)
-    end })
-    if api.nvim_win_is_valid(back) then
-      api.nvim_set_current_win(back)
+    vim.wo[thread.win].signcolumn = "no"
+    if thread.job and thread.buf and api.nvim_buf_is_valid(thread.buf) then
+      api.nvim_win_set_buf(thread.win, thread.buf)
+    else
+      thread.buf = api.nvim_create_buf(false, true)
+      api.nvim_win_set_buf(thread.win, thread.buf)
+      local t = S.d.thread
+      thread.job = vim.fn.jobstart({ t.bin, "thread", t.address, t.name }, {
+        term = true,
+        cwd = t.cwd,
+        on_exit = function()
+          vim.schedule(function()
+            thread.job = nil
+            thread_hide()
+            if thread.buf and api.nvim_buf_is_valid(thread.buf) then
+              api.nvim_buf_delete(thread.buf, { force = true })
+            end
+            thread.buf = nil
+          end)
+        end,
+      })
+      vim.keymap.set("t", "<C-h>", [[<C-\><C-n><C-w>h]], { buffer = thread.buf, desc = "back to the code" })
+      api.nvim_create_autocmd({ "BufEnter", "WinEnter" }, { buffer = thread.buf, callback = function()
+        vim.cmd("startinsert")
+      end })
     end
   end
-  thread.shown = nil
-  thread_read()
-  if not thread.timer then
-    thread.timer = uv.new_timer()
-    thread.timer:start(4000, 4000, vim.schedule_wrap(function()
-      if thread.win and api.nvim_win_is_valid(thread.win) then
-        thread_read()
-      end
-    end))
+  if focus then
+    api.nvim_set_current_win(thread.win)
+    vim.cmd("startinsert")
+  elseif api.nvim_win_is_valid(back) then
+    api.nvim_set_current_win(back)
   end
 end
 
@@ -2695,7 +2704,7 @@ local function thread_toggle()
   if thread.win and api.nvim_win_is_valid(thread.win) then
     thread_hide()
   else
-    thread_show()
+    thread_show(true)
   end
 end
 
@@ -2704,6 +2713,25 @@ end
 -- in the tour each time you ask. It is kept per MR head, so it is there again
 -- when you come back to the same change.
 local chat = { buf = nil, win = nil, sid = nil, busy = false, key = nil, context = {} }
+panes[#panes + 1] = chat
+
+-- How many lines the chat holds, without the room under them.
+local function chat_len()
+  return api.nvim_buf_line_count(chat.buf) - PAD
+end
+
+local function chat_foot()
+  if not S.d then
+    return
+  end
+  if chat.busy then
+    pane_foot(chat, "●  Claude is answering…", "OtAmber")
+    return
+  end
+  local n = #chat.context
+  local with = n > 0 and ("  ·  %d selection%s attached"):format(n, n == 1 and "" or "s") or ""
+  pane_foot(chat, ("›  ask Claude about %s%s    i or enter"):format(S.d.name, with), "OtDim")
+end
 
 local function chat_files()
   local dir = vim.fn.expand("~/.cache/ot/chat")
@@ -2717,16 +2745,14 @@ local function chat_append(text)
     return
   end
   vim.bo[chat.buf].modifiable = true
-  local n = api.nvim_buf_line_count(chat.buf)
+  local n = chat_len()
   local last = api.nvim_buf_get_lines(chat.buf, n - 1, n, false)[1] or ""
   local parts = vim.split(text, "\n", { plain = true })
   parts[1] = last .. parts[1]
   api.nvim_buf_set_lines(chat.buf, n - 1, n, false, parts)
   vim.bo[chat.buf].modifiable = false
-  vim.fn.writefile(api.nvim_buf_get_lines(chat.buf, 0, -1, false), (chat_files()))
-  if chat.win and api.nvim_win_is_valid(chat.win) then
-    api.nvim_win_set_cursor(chat.win, { api.nvim_buf_line_count(chat.buf), 0 })
-  end
+  vim.fn.writefile(api.nvim_buf_get_lines(chat.buf, 0, chat_len(), false), (chat_files()))
+  pane_end(chat.win, chat.buf)
 end
 
 -- Where you are, for Claude: the tour step you are reading, or the file shown.
@@ -2778,8 +2804,9 @@ local function chat_ask(q)
     render()
     return
   end
-  chat_append(("%s## you\n\n%s\n\n## claude\n\n"):format(api.nvim_buf_line_count(chat.buf) > 1 and "\n" or "", q))
+  chat_append(("%s## you\n\n%s\n\n## claude\n\n"):format(chat_len() > 1 and "\n" or "", q))
   chat.busy = true
+  chat_foot()
   local cmd = { "claude", "-p", "--model", "opus", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--strict-mcp-config", "--tools", "Read,Grep,Glob,Bash", "--allowedTools", "Read Grep Glob Bash(git diff:*) Bash(git log:*) Bash(git show:*) Bash(git blame:*)" }
   if chat.sid then
     vim.list_extend(cmd, { "--resume", chat.sid })
@@ -2829,6 +2856,7 @@ local function chat_ask(q)
   }, function(r)
     vim.schedule(function()
       chat.busy = false
+      chat_foot()
       if r.code ~= 0 and r.stderr and r.stderr ~= "" then
         chat_append("\n\n**claude: " .. vim.trim(r.stderr) .. "**")
       end
@@ -2862,7 +2890,7 @@ local function chat_show()
     api.nvim_buf_set_name(chat.buf, ("ot://%s/chat"):format(S.d.name))
     vim.bo[chat.buf].filetype = "markdown"
     local kept = vim.fn.filereadable(md) == 1 and vim.fn.readfile(md) or { "" }
-    api.nvim_buf_set_lines(chat.buf, 0, -1, false, kept)
+    api.nvim_buf_set_lines(chat.buf, 0, -1, false, padded(kept))
     vim.bo[chat.buf].modifiable = false
     for _, k in ipairs({ "C", "i", "<CR>" }) do
       vim.keymap.set("n", k, chat_input, { buffer = chat.buf, nowait = true, desc = "ask Claude" })
@@ -2872,16 +2900,28 @@ local function chat_show()
     end, { buffer = chat.buf, nowait = true, desc = "close the chat" })
   end
   if not (chat.win and api.nvim_win_is_valid(chat.win)) then
-    vim.cmd("botright vsplit")
+    -- Under the T3 thread when it shows, so the two share the right of the screen.
+    if thread.win and api.nvim_win_is_valid(thread.win) then
+      api.nvim_set_current_win(thread.win)
+      vim.cmd("belowright split")
+    else
+      vim.cmd("botright vsplit")
+      api.nvim_win_set_width(0, math.max(50, math.floor(vim.o.columns * 0.35)))
+    end
     chat.win = api.nvim_get_current_win()
     api.nvim_win_set_buf(chat.win, chat.buf)
-    api.nvim_win_set_width(chat.win, math.max(50, math.floor(vim.o.columns * 0.35)))
     vim.wo[chat.win].wrap, vim.wo[chat.win].linebreak = true, true
     vim.wo[chat.win].number, vim.wo[chat.win].relativenumber = false, false
     vim.wo[chat.win].winbar = "%#OtDim# chat about " .. S.d.name .. "%=C/i/enter ask  q close "
+    api.nvim_create_autocmd("WinClosed", { pattern = tostring(chat.win), once = true, callback = function()
+      vim.schedule(function()
+        pane_foot_close(chat)
+      end)
+    end })
   end
+  chat_foot()
   api.nvim_set_current_win(chat.win)
-  api.nvim_win_set_cursor(chat.win, { api.nvim_buf_line_count(chat.buf), 0 })
+  pane_end(chat.win, chat.buf)
 end
 
 local function chat_open()
@@ -2915,7 +2955,8 @@ local function chat_add()
   chat_show()
   chat.context[#chat.context + 1] = { from = from, text = text }
   local n = select(2, text:gsub("\n", "")) + 1
-  chat_append(("%s_(added %s, %d line%s, for your next question)_\n"):format(api.nvim_buf_line_count(chat.buf) > 1 and "\n" or "", from, n, n == 1 and "" or "s"))
+  chat_append(("%s_(added %s, %d line%s, for your next question)_\n"):format(chat_len() > 1 and "\n" or "", from, n, n == 1 and "" or "s"))
+  chat_foot()
   if api.nvim_win_is_valid(back) then
     api.nvim_set_current_win(back)
   end

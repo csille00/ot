@@ -275,8 +275,12 @@ struct App {
     was_on: HashMap<u64, u64>,
     /// The MRs you hid from the board (h), kept across runs.
     hidden: HashSet<u64>,
+    /// `ot thread`: one conversation, no board; leaving it quits.
+    only_thread: bool,
     /// Tours read ahead (l then T), and ones already kept, by MR.
     tours: HashMap<u64, boardui::Toured>,
+    /// The MR heads already looked at for a kept tour, so each is read from disk once.
+    tours_seen: HashSet<(u64, String)>,
     /// This machine as last read, for the board's htop strip.
     stats: Option<stats::Stats>,
     /// What Claude has been asked to read this run, by the heads of the
@@ -385,7 +389,9 @@ impl App {
             landings,
             was_on,
             hidden,
+            only_thread: false,
             tours: HashMap::new(),
+            tours_seen: HashSet::new(),
             stats: None,
             asked: HashSet::new(),
             tried: HashSet::new(),
@@ -535,6 +541,9 @@ impl App {
     /// Asks GitLab, unless a fetch is already out, and puts the next ask off.
     fn refresh(&mut self) {
         self.next_fetch = Instant::now() + self.every();
+        if self.only_thread {
+            return;
+        }
         if !self.fetching {
             self.fetching = self.fetches.send(()).is_ok();
         }
@@ -1076,9 +1085,15 @@ impl App {
     /// Which MRs already have their tour kept, so the board says so after a restart.
     fn tours_kept(&mut self) {
         let project = self.cfg.project.clone();
-        self.tours.retain(|iid, t| *t != boardui::Toured::Ready || self.snap.mr(*iid).is_some_and(|m| tour::told(&tour::run_dir(&project, m))));
+        // A ready tour is of the head it was read at; a push since makes it old.
+        let heads: HashMap<u64, &str> = self.snap.mrs.iter().map(|m| (m.iid, m.head.as_str())).collect();
+        let seen = &self.tours_seen;
+        self.tours.retain(|iid, t| *t != boardui::Toured::Ready || heads.get(iid).is_some_and(|h| seen.contains(&(*iid, h.to_string()))));
         for m in &self.snap.mrs {
-            if !self.tours.contains_key(&m.iid) && m.reach.is_none() && tour::told(&tour::run_dir(&project, m)) {
+            if m.reach.is_some() || !self.tours_seen.insert((m.iid, m.head.clone())) {
+                continue;
+            }
+            if !self.tours.contains_key(&m.iid) && tour::told(&tour::run_dir(&project, m)) {
                 self.tours.insert(m.iid, boardui::Toured::Ready);
             }
         }
@@ -1261,10 +1276,17 @@ impl App {
 }
 
 fn main() {
-    if std::env::args().len() > 1 {
-        eprintln!("usage: ot\n  run it in a checkout whose origin is a GitLab project");
-        std::process::exit(2);
-    }
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    // `ot thread <id> [name]`: one T3 thread's conversation alone, as the review
+    // shows it beside the code.
+    let only = match args.as_slice() {
+        [] => None,
+        [t, id, rest @ ..] if t == "thread" => Some((id.clone(), rest.join(" "))),
+        _ => {
+            eprintln!("usage: ot\n  run it in a checkout whose origin is a GitLab project\n       ot thread <id> [name]\n  one T3 thread's conversation alone");
+            std::process::exit(2);
+        }
+    };
     // Both git calls at once, since the first frame waits on them.
     let here = std::thread::spawn(git::branch);
     let cfg = match config::load() {
@@ -1282,11 +1304,19 @@ fn main() {
         project: cfg.project.clone(),
     });
     let (mut app, rx) = App::new(cfg, snap, gitlab, writer);
-    // Builds seam's language rules now, so the first review doesn't wait.
-    std::thread::spawn(review::rules);
-
     let mut term = ratatui::init();
-    app.images = image_picker().map(sessionui::Images::new);
+    if let Some((address, name)) = only {
+        app.only_thread = true;
+        app.side.hidden = true;
+        app.panel.hidden = true;
+        let name = if name.is_empty() { address.clone() } else { name };
+        let at = jiff::Timestamp::now().as_second();
+        app.open_thread(hc::Agent { address, name, status: hc::Status::Stopped, said: String::new(), at, pid: None, branch: String::new() });
+    } else {
+        // Builds seam's language rules now, so the first review doesn't wait.
+        std::thread::spawn(review::rules);
+        app.images = image_picker().map(sessionui::Images::new);
+    }
     // A late answer to the terminal query would read as keys; drop what is waiting.
     while event::poll(Duration::from_millis(150)).unwrap_or(false) {
         let _ = event::read();
@@ -1340,25 +1370,28 @@ fn run(
     let (lend, lent) = mpsc::channel();
     let tx = app.tx.clone();
     std::thread::spawn(move || input(tx, lent));
-    watch_claude(app.tx.clone(), cache::review_tree(&app.cfg.project));
-    let tx = app.tx.clone();
-    stats::watch(move |st| tx.send(Msg::Stats(st)).is_ok());
     let tx = app.tx.clone();
     hc::watch(move |agents| {
         let _ = tx.send(Msg::Hc(agents));
     });
-    // Read once a run: who works here changes slower than ot restarts.
-    if let Some(token) = app.cfg.slack_token.clone() {
+    // One conversation needs only its thread's news; the board's watchers stay off.
+    if !app.only_thread {
+        watch_claude(app.tx.clone(), cache::review_tree(&app.cfg.project));
         let tx = app.tx.clone();
-        std::thread::spawn(move || tx.send(Msg::Slack(slack::emails(&token))));
+        stats::watch(move |st| tx.send(Msg::Stats(st)).is_ok());
+        // Read once a run: who works here changes slower than ot restarts.
+        if let Some(token) = app.cfg.slack_token.clone() {
+            let tx = app.tx.clone();
+            std::thread::spawn(move || tx.send(Msg::Slack(slack::emails(&token))));
+        }
+        let (tx, gitlab, project) = (app.tx.clone(), app.gitlab.clone(), app.cfg.project.clone());
+        std::thread::spawn(move || tx.send(Msg::Members(gitlab.get().and_then(|g| g.members(&project)))));
+        let tx = app.tx.clone();
+        music::feed(move |frame| {
+            nvim::music(&frame);
+            let _ = tx.send(Msg::Music(frame));
+        });
     }
-    let (tx, gitlab, project) = (app.tx.clone(), app.gitlab.clone(), app.cfg.project.clone());
-    std::thread::spawn(move || tx.send(Msg::Members(gitlab.get().and_then(|g| g.members(&project)))));
-    let tx = app.tx.clone();
-    music::feed(move |frame| {
-        nvim::music(&frame);
-        let _ = tx.send(Msg::Music(frame));
-    });
     loop {
         let due = app
             .seek_due
@@ -1507,7 +1540,11 @@ fn run(
                     if let Some((screen, places)) = app.places() {
                         cache::pressed(screen, &name, keys::act(&name, &places));
                     }
-                    match key(app, &name) {
+                    let next = key(app, &name);
+                    if app.only_thread && matches!(app.shown, Shown::Board) {
+                        return Ok(());
+                    }
+                    match next {
                         Next::Stay => {}
                         Next::Quit => return Ok(()),
                         Next::Review(open) => review_in_nvim(term, &lend, app, open),

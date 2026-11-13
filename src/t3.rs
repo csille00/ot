@@ -244,6 +244,14 @@ pub fn send(address: &str, text: &str) -> Result<(), String> {
 
 /// The thread's latest messages as turns to read, oldest first.
 pub fn conversation(address: &str) -> Result<Vec<crate::claude::Turn>, String> {
+    match crate::finder::conversation(address, 60) {
+        Ok(turns) if !turns.is_empty() => Ok(turns),
+        _ => conversation_by_cli(address),
+    }
+}
+
+/// The same through T3's CLI, which takes a second; for when its database can't be read.
+fn conversation_by_cli(address: &str) -> Result<Vec<crate::claude::Turn>, String> {
     use crate::claude::{Turn, Who};
     let v = call(&["thread", "show", address, "--json", "--messages", "60"])?;
     let turns = v["messages"]

@@ -233,6 +233,29 @@ fn said(db: &Connection, id: &str) -> rusqlite::Result<Vec<Said>> {
     Ok(said)
 }
 
+/// The thread's last `most` messages, oldest first, from T3's database: what
+/// `t3 thread show` says, in milliseconds instead of a second.
+pub fn conversation(id: &str, most: usize) -> Result<Vec<crate::claude::Turn>, String> {
+    use crate::claude::{Turn, Who};
+    let db = connect()?;
+    let mut stmt = db
+        .prepare(
+            "SELECT role, json_extract(payload_json, '$.text') FROM orchestration_v2_projection_messages
+              WHERE thread_id = ?1 AND role IN ('user', 'assistant') ORDER BY created_at DESC LIMIT ?2",
+        )
+        .map_err(|e| format!("T3's database: {e}"))?;
+    let rows = stmt
+        .query_map(rusqlite::params![id, most as i64], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?.unwrap_or_default())))
+        .map_err(|e| format!("T3's database: {e}"))?;
+    let mut turns: Vec<Turn> = rows
+        .filter_map(Result::ok)
+        .filter(|(_, text)| !text.trim().is_empty())
+        .map(|(role, text)| Turn { who: if role == "user" { Who::You } else { Who::Claude }, text: text.trim().to_string(), at: 0, times: 1, agent: None })
+        .collect();
+    turns.reverse();
+    Ok(turns)
+}
+
 /// The provider and model your newest thread uses, for a new one: T3 starts none without.
 pub fn last_model() -> Option<(String, String)> {
     let db = connect().ok()?;
