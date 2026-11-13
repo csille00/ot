@@ -141,7 +141,7 @@ pub fn fetch(mac: &str, path: &str) -> Result<PathBuf, String> {
     let file = std::fs::File::create(&part).map_err(|e| e.to_string())?;
     let quoted = format!("'{}'", path.replace('\'', "'\\''"));
     let out = std::process::Command::new("ssh")
-        .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", mac, "cat", "--", &quoted])
+        .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "StrictHostKeyChecking=accept-new", mac, "cat", "--", &quoted])
         .stdout(file)
         .stderr(std::process::Stdio::piped())
         .output()
