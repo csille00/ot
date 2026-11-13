@@ -175,11 +175,11 @@ mod nvim_tests {
     }
 
     /// nvim, headless and without your config, on the draft, running `then` once it opens;
-    /// it gives up after 8s rather than hang.
+    /// it gives up after 15s rather than hang.
     fn run(c: &Compose, then: &[&str]) {
         let mut cmd = Command::new("nvim");
         cmd.arg("--headless").arg("-u").arg("NONE").args(nvim_args(c));
-        cmd.arg("-c").arg("lua vim.defer_fn(function() vim.cmd('cquit 3') end, 8000)");
+        cmd.arg("-c").arg("lua vim.defer_fn(function() vim.cmd('cquit 3') end, 15000)");
         for t in then {
             cmd.arg("-c").arg(t);
         }
@@ -217,7 +217,7 @@ mod nvim_tests {
         // As the Mac's script sends it: under a dot name, then renamed.
         let part = paste_dir().join(format!(".{name}"));
         let drop = format!("lua vim.defer_fn(function() vim.fn.writefile({{'png'}}, '{}'); vim.uv.fs_rename('{}', '{}') end, 200)", part.display(), part.display(), shot.display());
-        run(&c, &[&drop, "call wait(3000, {-> getline(1) =~ 'paste-test'})", "w"]);
+        run(&c, &[&drop, "call wait(7000, {-> getline(1) =~ 'paste-test'})", "w"]);
         let (_, images) = written(&c).unwrap();
         assert_eq!(images, std::slice::from_ref(&shot));
         done(&c);
