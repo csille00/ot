@@ -65,6 +65,7 @@ end, 10)
 
 local l = list()
 check(has(l, "^!301  Sum with reduce"), "the title heads the list")
+check(has(l, "needs approval"), "the header says what the MR needs before it can merge")
 check(has(l, "^▸ · report 2 +1 +%+1 +−1 *$"), "report closed over its two, with its one open thread and its counts in columns")
 check(has(l, "^  − unused +−2 *$"), "unused is a root, removed, with nothing under it")
 check(not has(l, "total"), "everything starts closed: total stays under report")

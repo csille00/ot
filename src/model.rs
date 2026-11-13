@@ -1392,6 +1392,45 @@ pub fn bang(iid: u64) -> String {
     format!("!{}", with_commas(iid).replace(',', "_"))
 }
 
+/// Whether the MR can merge, in a few words, and how that reads: what stops it first.
+pub fn merge_status(mr: &Mr) -> (String, Tone) {
+    if mr.reach.is_some() {
+        return ("merged".into(), Tone::Green);
+    }
+    if mr.conflicts && !mr.rechecking {
+        return (format!("conflicts with {}", mr.target), Tone::Red);
+    }
+    if !mr.merge_error.is_empty() {
+        return (format!("last merge failed: {}", mr.merge_error), Tone::Red);
+    }
+    if mr.draft {
+        return ("draft: mark it ready to merge".into(), Tone::Dim);
+    }
+    if mr.pipeline == "failed" {
+        return ("blocked: pipeline failed".into(), Tone::Red);
+    }
+    if mr.open_threads > 0 {
+        let n = mr.open_threads as u64;
+        return (format!("blocked: {n} open {}", plural(n, "thread", "threads")), Tone::Amber);
+    }
+    if mr.auto_merge {
+        return ("merges itself once ready".into(), Tone::Teal);
+    }
+    if mr.mergeable && running(&mr.pipeline) {
+        return ("ready once the pipeline passes".into(), Tone::Amber);
+    }
+    if mr.mergeable {
+        return ("ready to merge".into(), Tone::Green);
+    }
+    if !mr.approved {
+        return ("needs approval".into(), Tone::Amber);
+    }
+    if mr.rechecking {
+        return ("GitLab is checking it".into(), Tone::Dim);
+    }
+    ("can't merge yet".into(), Tone::Amber)
+}
+
 /// "+1,354 −514", with a real minus.
 pub fn size(adds: u64, dels: u64) -> String {
     format!("+{} \u{2212}{}", with_commas(adds), with_commas(dels))
@@ -1631,6 +1670,28 @@ pub mod fixture {
             ..Default::default()
         };
         (snap, tickets, vec![lead])
+    }
+}
+
+#[cfg(test)]
+mod merge_tests {
+    use super::*;
+
+    #[test]
+    fn merge_status_says_what_stops_it_first() {
+        let mut m = fixture::mr(1, "sam", "sam/a", "main");
+        m.mergeable = true;
+        m.pipeline = "success".into();
+        m.approved = true;
+        assert_eq!(merge_status(&m).0, "ready to merge");
+        m.pipeline = "running".into();
+        assert_eq!(merge_status(&m).0, "ready once the pipeline passes");
+        m.open_threads = 2;
+        assert_eq!(merge_status(&m).0, "blocked: 2 open threads");
+        m.conflicts = true;
+        assert_eq!(merge_status(&m), ("conflicts with main".to_string(), Tone::Red));
+        m.rechecking = true;
+        assert_eq!(merge_status(&m).0, "blocked: 2 open threads", "a conflict GitLab is looking at again doesn't count yet");
     }
 }
 

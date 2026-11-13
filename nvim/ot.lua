@@ -498,6 +498,9 @@ local function render()
   text(d.name .. "  " .. d.title, "OtTitle")
   local seen, all = tally()
   local facts = { { { d.author, "OtDim" } }, { { d.size, "OtDim" } }, { { ("%d of %d viewed"):format(seen, all), seen == all and "OtGreen" or "OtDim" } } }
+  if d.merge then
+    table.insert(facts, 1, { { d.merge.word, d.merge.hl } })
+  end
   if #S.drafts > 0 then
     facts[#facts + 1] = { { ("%d %s not sent"):format(#S.drafts, #S.drafts == 1 and "draft" or "drafts"), "OtPink" } }
   end

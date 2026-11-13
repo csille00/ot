@@ -20,6 +20,11 @@ pub fn info(m: &Mr, w: usize, now: i64) -> Vec<Line<'static>> {
         out.push(o.line());
     }
     out.push(Line::styled(format!(" {} → {}", m.source, m.target), fg(DIM)));
+    let (merge, tone) = crate::model::merge_status(m);
+    out.push(Line::from(vec![
+        ratatui::text::Span::styled(" merge: ", fg(DIM)),
+        ratatui::text::Span::styled(merge, fg(super::tone(tone)).add_modifier(Modifier::BOLD)),
+    ]));
     let mut o = Out::default();
     o.put(" ", Style::new());
     let fact = |o: &mut Out, text: &str, style: Style| {

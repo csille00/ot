@@ -633,6 +633,23 @@ fn write_json(path: &Path, v: &Value) {
     let _ = cache::write(path, v.to_string().as_bytes());
 }
 
+/// The MR's merge status for the review's header, with the highlight it reads in.
+fn merge_status(mr: &Mr) -> Value {
+    use crate::model::Tone;
+    let (word, tone) = crate::model::merge_status(mr);
+    let hl = match tone {
+        Tone::Green => "OtGreen",
+        Tone::Red => "OtRed",
+        Tone::Amber => "OtAmber",
+        Tone::Orange => "OtOrange",
+        Tone::Teal => "OtTeal",
+        Tone::Pink => "OtPink",
+        Tone::Faint => "OtFaint",
+        Tone::Dim => "OtDim",
+    };
+    json!({ "word": word, "hl": hl })
+}
+
 /// nvim with your config and this ot's own plugin, opening the review.
 pub fn command(open: &Open) -> Command {
     let file = scratch().join("ot.lua");
@@ -724,6 +741,7 @@ pub fn shown(
         "mine": mine,
         "pipeline": mr.pipeline,
         "failed_jobs": mr.failed_jobs,
+        "merge": merge_status(mr),
         "size": size,
         "files": files,
         "symbols": symbols,

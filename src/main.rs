@@ -1066,9 +1066,15 @@ impl App {
             .collect()
     }
 
-    /// The MR of the thread being read: the one it opened, else the one its own branch is.
+    /// The MR of the thread being read: the one it opened, else the one its own branch is;
+    /// for a session of Claude's, its branch's.
     fn thread_mr(&self) -> Option<&model::Mr> {
-        let a = self.reply_to()?;
+        let Some(a) = self.reply_to() else {
+            // A session of Claude's: the open MR its checkout's branch is.
+            let Shown::Session { id, .. } = &self.shown else { return None };
+            let s = self.sessions.iter().find(|s| s.id == *id)?;
+            return self.snap.mrs.iter().find(|m| !s.branch.is_empty() && m.source == s.branch && m.reach.is_none());
+        };
         let opened = t3::mr(&a.address, &self.cfg.project).and_then(|iid| self.snap.mr(iid));
         opened.or_else(|| self.snap.mrs.iter().find(|m| !a.branch.is_empty() && m.source == a.branch && m.reach.is_none()))
     }
