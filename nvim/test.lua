@@ -307,12 +307,23 @@ api.nvim_win_set_width(list_win, 30)
 vim.cmd.doautocmd("VimResized")
 check(has(removed_rows(), "^function unused%(%) {$"), "and the line is whole again once the code is wide")
 
-press("v")
-local f = io.open(vim.fs.dirname(vim.env.OT_REVIEW) .. "/viewed", "r")
-check(f ~= nil and f:read("a"):find("#file\t") ~= nil, "v writes the file's mark")
-if f then
-  f:close()
+local function marks()
+  local f = io.open(vim.fs.dirname(vim.env.OT_REVIEW) .. "/viewed", "r")
+  local text = f and f:read("a") or ""
+  if f then
+    f:close()
+  end
+  return text, select(2, text:gsub("[^\n]+", ""))
 end
+local _, before = marks()
+press("v")
+local written, after = marks()
+check(written:find("#file\t") ~= nil, "v writes the file's mark")
+check(after - before > 1, ("and marks what is in the file with it: %d marks, then %d"):format(before, after))
+press("v")
+local unwritten, again = marks()
+check(not unwritten:find("#file\t") and again == before, "v again unmarks the file and what is in it")
+press("v")
 
 -- Writing goes back to ot: a comment on line 8, a draft on someone else's
 -- MR, then the review finished with an approval and a word.

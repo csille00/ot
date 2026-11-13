@@ -1758,8 +1758,41 @@ local function viewed()
   if not resting(r) or r.kind == "overview" or r.kind == "tour" then
     return
   end
-  local mark, path = thing(r).mark, S.d.viewed_path
-  S.viewed[mark] = (not S.viewed[mark]) or nil
+  local path = S.d.viewed_path
+  local now = (not S.viewed[thing(r).mark]) or nil
+  -- The row and everything under it take its new state: a symbol's kids, all
+  -- the way down, and a file's symbols and changes outside one.
+  local marks, seen = {}, {}
+  local function under(i)
+    if seen[i] then
+      return
+    end
+    seen[i] = true
+    marks[#marks + 1] = S.d.symbols[i].mark
+    for _, k in ipairs(S.d.symbols[i].kids) do
+      under(k)
+    end
+  end
+  if r.kind == "symbol" then
+    under(r.i)
+  else
+    marks[1] = thing(r).mark
+  end
+  if r.kind == "file" then
+    for i, sym in ipairs(S.d.symbols) do
+      if sym.file == r.i then
+        under(i)
+      end
+    end
+    for _, l in ipairs(S.d.loose) do
+      if l.file == r.i then
+        marks[#marks + 1] = l.mark
+      end
+    end
+  end
+  for _, m in ipairs(marks) do
+    S.viewed[m] = now
+  end
   local all = {}
   local f = io.open(path, "r")
   if f then
@@ -1768,7 +1801,9 @@ local function viewed()
     end
     f:close()
   end
-  all[mark] = S.viewed[mark]
+  for _, m in ipairs(marks) do
+    all[m] = now
+  end
   local keep = vim.tbl_keys(all)
   table.sort(keep)
   vim.fn.mkdir(vim.fs.dirname(path), "p")
