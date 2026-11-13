@@ -1232,8 +1232,7 @@ impl App {
 
     /// The T3 threads beside a conversation, the one being read among them, as
     /// T3 lists them: the done ones on top, then those waiting on you, then those
-    /// at work at the bottom; oldest first within each, so the list reads down to
-    /// what is happening now, and its end is what stays in view.
+    /// at work at the bottom; newest first within each.
     fn side_threads(&self) -> Vec<hc::Agent> {
         let mut threads: Vec<hc::Agent> = self.agents.iter().filter(|a| t3::owns(&a.address)).cloned().collect();
         if let Some(r) = self.reply_to() {
@@ -1241,7 +1240,7 @@ impl App {
                 threads.push(r);
             }
         }
-        threads.sort_by_key(|a| (side_rank(a.status), a.at));
+        threads.sort_by_key(|a| (side_rank(a.status), std::cmp::Reverse(a.at)));
         threads
     }
 

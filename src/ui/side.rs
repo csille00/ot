@@ -44,16 +44,37 @@ pub fn draw(f: &mut Frame, area: Rect, s: &Side, now: i64) {
     // then a blank line.
     let room = w.saturating_sub(3 + 5);
     let lines: Vec<Vec<(String, Style)>> = s.threads.iter().map(|a| entry(a, s, room)).collect();
-    // The working threads are at the bottom, so the list keeps its end in view,
-    // scrolling up only as far as it must for the thread marked.
-    let fits = |from: usize, to: usize| lines[from..to].iter().map(|l| l.len() + 1).sum::<usize>() <= rows + 1;
-    let mut top = 0;
-    while top < lines.len() && !fits(top, lines.len()) {
-        top += 1;
-    }
-    top = top.min(at);
+    let tall = |from: usize, to: usize| lines[from..to].iter().map(|l| l.len() + 1).sum::<usize>();
+    // The threads at work (and those waiting on you) are at the bottom and always
+    // in view; the done ones above them scroll, as far as the thread marked needs.
+    let busy = s.threads.iter().position(|a| a.status != Status::Stopped).unwrap_or(s.threads.len());
+    let shown: Vec<usize> = if tall(busy, lines.len()) <= rows + 1 {
+        let room = rows + 1 - tall(busy, lines.len());
+        let mut top = 0;
+        while at < busy && top < at && tall(top, at + 1) > room {
+            top += 1;
+        }
+        let mut done = vec![];
+        let mut used = 0;
+        for i in top..busy {
+            used += lines[i].len() + 1;
+            if used > room {
+                break;
+            }
+            done.push(i);
+        }
+        done.into_iter().chain(busy..lines.len()).collect()
+    } else {
+        // More at work than fits: the whole list scrolls, keeping its end in view.
+        let mut top = 0;
+        while top < lines.len() && tall(top, lines.len()) > rows + 1 {
+            top += 1;
+        }
+        (top.min(at)..lines.len()).collect()
+    };
     let mut y = area.y + 2;
-    for (i, a) in s.threads.iter().enumerate().skip(top) {
+    for i in shown {
+        let a = &s.threads[i];
         if y + lines[i].len() as u16 > area.bottom() {
             break;
         }
