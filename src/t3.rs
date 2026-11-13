@@ -304,10 +304,48 @@ pub fn settle(address: &str) -> Result<(), String> {
     dispatch(serde_json::json!({ "type": "thread.settle", "threadId": address })).map(|_| ())
 }
 
-/// One orchestration command through T3's WebSocket, as its own apps send them; T3's
-/// CLI has no settle or stop yet. The command gets a fresh id; the server's answer back.
+/// One orchestration command through T3's WebSocket; T3's CLI has no settle or stop yet.
+/// The command gets a fresh id.
 fn dispatch(mut command: Value) -> Result<Value, String> {
     command["commandId"] = Value::String(uuid4());
+    rpc("orchestration.dispatchCommand", command)
+}
+
+/// Sends `text` to the thread with these images attached, as T3's apps do: the images
+/// stored first, then the message naming them.
+pub fn send_with_images(address: &str, text: &str, images: &[PathBuf], busy: bool) -> Result<(), String> {
+    let message_id = uuid4();
+    let mut uploads = vec![];
+    for p in images {
+        let bytes = std::fs::read(p).map_err(|e| format!("{}: {e}", p.display()))?;
+        let mime = crate::compose::mime(p).ok_or_else(|| format!("{} isn't an image", p.display()))?;
+        let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "image".into());
+        uploads.push(serde_json::json!({
+            "type": "image",
+            "name": name,
+            "mimeType": mime,
+            "sizeBytes": bytes.len(),
+            "dataUrl": format!("data:{mime};base64,{}", crate::term::base64(&bytes)),
+        }));
+    }
+    let stored = rpc("assets.persistChatAttachments", serde_json::json!({ "threadId": address, "messageId": message_id, "attachments": uploads }))?;
+    let attachments = stored["attachments"].clone();
+    dispatch(serde_json::json!({
+        "type": "message.dispatch",
+        "threadId": address,
+        "messageId": message_id,
+        "text": text,
+        "attachments": attachments,
+        "createdBy": "user",
+        "creationSource": "web",
+        // A busy thread takes it after its turn, as `t3 thread send` does.
+        "dispatchMode": { "type": if busy { "queue_after_active" } else { "start_immediately" } },
+    }))
+    .map(|_| ())
+}
+
+/// One of T3's WebSocket RPCs, as its own apps call them; the server's answer back.
+fn rpc(tag: &str, payload: Value) -> Result<Value, String> {
     let origin = server_origin()?;
     let ticket = match ws_ticket(&origin, &token(false)?) {
         Err(e) if e == "401" => ws_ticket(&origin, &token(true)?)?,
@@ -315,7 +353,7 @@ fn dispatch(mut command: Value) -> Result<Value, String> {
     };
     let url = format!("{}/ws?wsTicket={ticket}&orchestrationProtocol=2", origin.replacen("http", "ws", 1));
     let (mut ws, _) = tungstenite::connect(url.as_str()).map_err(|e| format!("T3's socket: {e}"))?;
-    let request = serde_json::json!({ "_tag": "Request", "id": "1", "tag": "orchestration.dispatchCommand", "payload": command, "headers": [] });
+    let request = serde_json::json!({ "_tag": "Request", "id": "1", "tag": tag, "payload": payload, "headers": [] });
     ws.send(tungstenite::Message::text(request.to_string())).map_err(|e| format!("T3's socket: {e}"))?;
     let deadline = Instant::now() + Duration::from_secs(15);
     while Instant::now() < deadline {

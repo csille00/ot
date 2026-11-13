@@ -1,0 +1,226 @@
+//! A reply written in your own nvim (nvim/compose.lua): the draft kept per thread in
+//! ~/.cache/ot/compose until :w sends it, with the images it names attached.
+use crate::claude::{Turn, Who};
+use crate::hc::Agent;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+const SCRIPT: &str = include_str!("../nvim/compose.lua");
+
+/// Turns of the conversation drawn behind the draft.
+const CONTEXT: usize = 30;
+
+/// A reply being written to `to`.
+pub struct Compose {
+    pub to: Agent,
+    draft: PathBuf,
+    meta: PathBuf,
+    sent: PathBuf,
+}
+
+/// Where images the Mac sends land, for the draft to attach.
+pub fn paste_dir() -> PathBuf {
+    cache().join("paste")
+}
+
+fn cache() -> PathBuf {
+    PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".cache/ot")
+}
+
+/// The draft to `to`, as left last time, and what nvim needs to show it; `plain` when
+/// it has a pane of its own, with no conversation behind it.
+pub fn prepare(to: &Agent, turns: &[Turn], plain: bool) -> Result<Compose, String> {
+    let dir = cache().join("compose");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let name: String = to.address.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect();
+    let draft = dir.join(format!("{name}.md"));
+    let (meta, sent, context) = (dir.join(format!("{name}.json")), dir.join(format!("{name}.sent")), dir.join(format!("{name}.context.md")));
+    let _ = std::fs::remove_file(&sent);
+    if !draft.exists() {
+        std::fs::write(&draft, "").map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&context, conversation(&to.name, turns)).map_err(|e| e.to_string())?;
+    let script = crate::nvim::scratch().join("compose.lua");
+    std::fs::create_dir_all(crate::nvim::scratch()).map_err(|e| e.to_string())?;
+    std::fs::write(&script, SCRIPT).map_err(|e| e.to_string())?;
+    let m = serde_json::json!({
+        "title": format!("reply to {}", to.name),
+        "draft": draft,
+        "sent": sent,
+        "context": context,
+        "paste": paste_dir(),
+        "plain": plain,
+    });
+    std::fs::write(&meta, m.to_string()).map_err(|e| e.to_string())?;
+    Ok(Compose { to: to.clone(), draft, meta, sent })
+}
+
+fn conversation(name: &str, turns: &[Turn]) -> String {
+    let mut out = format!("# {name}\n");
+    let said: Vec<&Turn> = turns.iter().filter(|t| t.who != Who::Tool).collect();
+    for t in said.iter().skip(said.len().saturating_sub(CONTEXT)) {
+        out.push_str(if t.who == Who::You { "\n## you\n\n" } else { "\n## claude\n\n" });
+        out.push_str(t.text.trim());
+        out.push('\n');
+    }
+    out
+}
+
+/// nvim on the draft, with your config.
+pub fn nvim(c: &Compose) -> Command {
+    let mut cmd = Command::new("nvim");
+    cmd.args(nvim_args(c));
+    cmd
+}
+
+fn nvim_args(c: &Compose) -> Vec<String> {
+    let script = crate::nvim::scratch().join("compose.lua");
+    vec![
+        "--cmd".into(),
+        format!("let g:ot_compose = '{}'", c.meta.display()),
+        "-c".into(),
+        format!("lua dofile('{}')", script.display()),
+        c.draft.display().to_string(),
+    ]
+}
+
+/// The same in a floating zellij pane over ot, which returns once the pane closes.
+pub fn zellij(c: &Compose, cwd: &Path) -> Command {
+    let mut cmd = Command::new("zellij");
+    cmd.args(["action", "new-pane", "--floating", "--close-on-exit", "--blocking", "--width", "80%", "--height", "70%", "--x", "10%", "--y", "10%"]);
+    cmd.arg("--name").arg(format!("reply to {}", c.to.name)).arg("--cwd").arg(cwd).arg("--").arg("nvim").args(nvim_args(c));
+    cmd
+}
+
+/// What :w sent, as text and the images it names; None when nvim was left without it.
+pub fn written(c: &Compose) -> Option<(String, Vec<PathBuf>)> {
+    if !c.sent.exists() {
+        return None;
+    }
+    let text = std::fs::read_to_string(&c.draft).ok()?;
+    let (text, images) = images(&text);
+    Some((text, images))
+}
+
+/// The draft is sent: nothing of it is kept.
+pub fn done(c: &Compose) {
+    for p in [&c.draft, &c.sent] {
+        let _ = std::fs::remove_file(p);
+    }
+}
+
+/// `text` without its `![name](path)` images that are files here, and those files.
+pub fn images(text: &str) -> (String, Vec<PathBuf>) {
+    let mut out = String::new();
+    let mut found = vec![];
+    let mut rest = text;
+    while let Some(i) = rest.find("![") {
+        out.push_str(&rest[..i]);
+        let after = &rest[i..];
+        let picked = after.find("](").and_then(|j| after[j + 2..].find(')').map(|k| (j + 2, j + 2 + k)));
+        match picked {
+            Some((from, to)) if is_image(Path::new(&after[from..to])) => {
+                found.push(PathBuf::from(&after[from..to]));
+                rest = &after[to + 1..];
+            }
+            _ => {
+                out.push_str("![");
+                rest = &after[2..];
+            }
+        }
+    }
+    out.push_str(rest);
+    (out.trim().to_string(), found)
+}
+
+fn is_image(p: &Path) -> bool {
+    p.is_file() && mime(p).is_some()
+}
+
+/// An image's type, by its name.
+pub fn mime(p: &Path) -> Option<&'static str> {
+    match p.extension()?.to_str()?.to_ascii_lowercase().as_str() {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn images_that_are_files_here_come_out_of_the_text() {
+        let dir = std::env::temp_dir().join(format!("ot-compose-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let shot = dir.join("shot.png");
+        std::fs::write(&shot, b"png").unwrap();
+        let text = format!("look at this\n![shot.png]({})\nand ![gone](/nowhere/x.png) too", shot.display());
+        let (text, found) = images(&text);
+        assert_eq!(found, [shot]);
+        assert_eq!(text, "look at this\n\nand ![gone](/nowhere/x.png) too");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[cfg(test)]
+mod nvim_tests {
+    use super::*;
+
+    fn agent() -> Agent {
+        Agent { address: format!("test-{}", std::process::id()), name: "billing".into(), status: crate::hc::Status::Stopped, said: String::new(), at: 0, pid: None, branch: String::new() }
+    }
+
+    /// nvim, headless and without your config, on the draft, running `then` once it opens;
+    /// it gives up after 8s rather than hang.
+    fn run(c: &Compose, then: &[&str]) {
+        let mut cmd = Command::new("nvim");
+        cmd.arg("--headless").arg("-u").arg("NONE").args(nvim_args(c));
+        cmd.arg("-c").arg("lua vim.defer_fn(function() vim.cmd('cquit 3') end, 8000)");
+        for t in then {
+            cmd.arg("-c").arg(t);
+        }
+        let out = cmd.output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    }
+
+    #[test]
+    fn w_sends_what_is_written_and_q_keeps_it_for_next_time() {
+        if Command::new("nvim").arg("--version").output().is_err() {
+            return;
+        }
+        let turns = vec![Turn { who: Who::Claude, text: "Done.".into(), at: 0, times: 1, agent: None }];
+        let c = prepare(&agent(), &turns, false).unwrap();
+        run(&c, &["call setline(1, 'kept for later')", "q"]);
+        assert!(written(&c).is_none(), ":q sends nothing");
+        let c = prepare(&agent(), &turns, false).unwrap();
+        assert_eq!(std::fs::read_to_string(&c.draft).unwrap().trim(), "kept for later", "the draft comes back");
+        run(&c, &["call setline(1, 'ship it')", "w"]);
+        assert_eq!(written(&c).map(|w| w.0), Some("ship it".to_string()));
+        done(&c);
+        assert!(!c.draft.exists());
+    }
+
+    #[test]
+    fn an_image_sent_to_the_paste_folder_goes_in_the_draft() {
+        if Command::new("nvim").arg("--version").output().is_err() {
+            return;
+        }
+        let mut a = agent();
+        a.address.push_str("-img");
+        let c = prepare(&a, &[], true).unwrap();
+        let name = format!("paste-test-{}.png", std::process::id());
+        let shot = paste_dir().join(&name);
+        // As the Mac's script sends it: under a dot name, then renamed.
+        let part = paste_dir().join(format!(".{name}"));
+        let drop = format!("lua vim.defer_fn(function() vim.fn.writefile({{'png'}}, '{}'); vim.uv.fs_rename('{}', '{}') end, 200)", part.display(), part.display(), shot.display());
+        run(&c, &[&drop, "call wait(3000, {-> getline(1) =~ 'paste-test'})", "w"]);
+        let (_, images) = written(&c).unwrap();
+        assert_eq!(images, std::slice::from_ref(&shot));
+        done(&c);
+        let _ = std::fs::remove_file(shot);
+    }
+}

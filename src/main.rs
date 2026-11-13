@@ -8,6 +8,7 @@ mod ask;
 mod brief;
 mod cache;
 mod claude;
+mod compose;
 mod config;
 mod finder;
 mod git;
@@ -121,6 +122,8 @@ enum Msg {
     },
     /// How something asked of one of hc's agents went, for the note.
     Asked(String),
+    /// A reply's nvim, in its zellij pane, is done.
+    Composed(compose::Compose),
     /// A T3 thread started with `text`, its id, or why it wasn't.
     Started {
         text: String,
@@ -190,6 +193,8 @@ enum Next {
     Attach(hc::Agent),
     /// The terminal to a shell in this folder, until it exits.
     Shell(PathBuf),
+    /// A reply to the agent, written in nvim.
+    Compose(hc::Agent),
 }
 
 /// A pick cliamp is loading, until it answers for that url.
@@ -1259,6 +1264,7 @@ fn run(
                     app.rebuild();
                     app.read_said();
                 }
+                Msg::Composed(c) => send_composed(app, c),
                 Msg::Started { text, result } => match result {
                     Ok(id) => {
                         app.note = None;
@@ -1321,6 +1327,7 @@ fn run(
                         Next::Quit => return Ok(()),
                         Next::Review(open) => review_in_nvim(term, &lend, app, open),
                         Next::Attach(agent) if t3::owns(&agent.address) => app.open_thread(agent),
+                        Next::Compose(to) => compose_reply(term, &lend, app, to),
                         Next::Shell(dir) => {
                             let mut sh = Command::new(std::env::var_os("SHELL").unwrap_or_else(|| "bash".into()));
                             sh.current_dir(&dir);
@@ -1387,6 +1394,11 @@ fn key(app: &mut App, name: &str) -> Next {
     match &app.shown {
         Shown::Music(_) => music_act(app, act),
         Shown::Session { .. } | Shown::Thread { .. } if act == Act::Terminal => return terminal(app),
+        Shown::Session { .. } | Shown::Thread { .. } if act == Act::Tell && app.side.cursor.is_none() => {
+            if let Some(to) = app.reply_to() {
+                return Next::Compose(to);
+            }
+        }
         Shown::Session { .. } | Shown::Thread { .. } if act == Act::Review && app.side.cursor.is_none() => {
             if let Some(mr) = app.thread_mr().cloned() {
                 return app.review(&mr, false);
@@ -1396,6 +1408,66 @@ fn key(app: &mut App, name: &str) -> Next {
         Shown::Board => return board_act(app, act),
     }
     Next::Stay
+}
+
+/// A reply written in nvim: a floating zellij pane over ot inside zellij, else this
+/// terminal until nvim quits. :w in it sends the reply.
+fn compose_reply(term: &mut ratatui::DefaultTerminal, lend: &Sender<Lend>, app: &mut App, to: hc::Agent) {
+    let turns = match &app.shown {
+        Shown::Thread { agent, turns, .. } if agent.address == to.address => turns.clone(),
+        Shown::Session { id, .. } => app.sessions.iter().find(|s| s.id == *id).map(|s| s.turns.clone()).unwrap_or_default(),
+        _ => app.read.get(&to.address).cloned().unwrap_or_default(),
+    };
+    let in_zellij = std::env::var_os("ZELLIJ").is_some();
+    let c = match compose::prepare(&to, &turns, in_zellij) {
+        Ok(c) => c,
+        Err(e) => {
+            app.note = Some(format!("can't write a reply: {e}"));
+            return;
+        }
+    };
+    if in_zellij {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let tx = app.tx.clone();
+        std::thread::spawn(move || {
+            let _ = compose::zellij(&c, &cwd).status();
+            let _ = tx.send(Msg::Composed(c));
+        });
+        return;
+    }
+    if let Err(e) = lend_terminal(term, lend, compose::nvim(&c)) {
+        app.note = Some(e);
+    }
+    send_composed(app, c);
+}
+
+/// Sends what :w wrote, its images attached for a T3 thread; else the draft stays.
+fn send_composed(app: &mut App, c: compose::Compose) {
+    let Some((text, images)) = compose::written(&c) else {
+        app.note = Some(format!("not sent; your draft to {} is kept for the next s", c.to.name));
+        return;
+    };
+    let to = c.to.clone();
+    app.note = Some(format!("sending to {}…", to.name));
+    let tx = app.tx.clone();
+    std::thread::spawn(move || {
+        let sent = if !images.is_empty() && t3::owns(&to.address) {
+            t3::send_with_images(&to.address, &text, &images, to.status == hc::Status::Working)
+        } else if images.is_empty() {
+            hc::send(&to.address, &text)
+        } else {
+            Err("images go only to T3 threads".into())
+        };
+        let how = match sent {
+            Ok(()) => {
+                compose::done(&c);
+                let n = images.len();
+                if n > 0 { format!("sent to {}, with {n} image{}", to.name, if n == 1 { "" } else { "s" }) } else { format!("sent to {}", to.name) }
+            }
+            Err(e) => format!("not sent to {}: {e}; your draft is kept", to.name),
+        };
+        let _ = tx.send(Msg::Asked(how));
+    });
 }
 
 /// A shell where the session or thread being read works: a zellij pane beside ot
@@ -1906,7 +1978,7 @@ app.shown = Shown::Session {
         }
         Act::Tell => {
             if let Some(a) = app.picked_agent() {
-                app.view.mode = Mode::Tell { to: a.clone(), text: String::new() };
+                return Next::Compose(a.clone());
             }
         }
         Act::Stop => {
@@ -2196,7 +2268,7 @@ fn settle(app: &mut App, a: hc::Agent) {
             Ok(()) => format!("settled {}", a.name),
             Err(e) => format!("{} not settled: {e}", a.name),
         };
-        tx.send(Msg::Asked(how))
+        let _ = tx.send(Msg::Asked(how));
     });
 }
 
