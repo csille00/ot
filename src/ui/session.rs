@@ -160,8 +160,13 @@ impl<'a> Transcript<'a> {
     }
 }
 
-pub fn draw(f: &mut Frame, t: &Transcript, now: i64, v: &mut View, places: &[Place], note: Option<&str>, mut images: Option<&mut Images>) {
-    let area = f.area();
+pub fn draw(f: &mut Frame, t: &Transcript, now: i64, v: &mut View, places: &[Place], note: Option<&str>, images: Option<&mut Images>) {
+    draw_in(f, f.area(), t, now, v, places, note, images);
+}
+
+/// The same in `area` of the screen, which the thread list may share.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_in(f: &mut Frame, area: Rect, t: &Transcript, now: i64, v: &mut View, places: &[Place], note: Option<&str>, mut images: Option<&mut Images>) {
     let right = (area.width as usize).saturating_sub(1);
     let head = header(t, right);
     let font = images.as_ref().map(|i| i.font());

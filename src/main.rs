@@ -268,6 +268,18 @@ struct App {
     focused: bool,
     /// The thread finder, over whatever is up, while it is open.
     finder: Option<finder::Finder>,
+    /// The thread list beside a conversation.
+    side: Side,
+    /// Each T3 thread's turns as last read, shown at once when you switch back to it.
+    read: HashMap<String, Vec<claude::Turn>>,
+}
+
+/// The thread list beside a conversation: hidden by b, and the thread its cursor
+/// is on while it has the keys.
+#[derive(Default)]
+struct Side {
+    hidden: bool,
+    cursor: Option<String>,
 }
 
 impl App {
@@ -328,6 +340,8 @@ impl App {
             told: BTreeMap::new(),
             focused: true,
             finder: None,
+            side: Side::default(),
+            read: HashMap::new(),
         };
         app.rebuild();
         app.view.top(&app.board);
@@ -417,6 +431,9 @@ impl App {
             Shown::Session { .. } | Shown::Thread { .. } => {
                 if !matches!(self.view.mode, Mode::Board) {
                     return None;
+                }
+                if self.side.cursor.is_some() {
+                    return Some(("threads", vec![keys::Place::Side]));
                 }
                 let mut at = vec![keys::Place::Transcript];
                 if self.reply_to().is_some() {
@@ -971,13 +988,31 @@ impl App {
         }
     }
 
-    /// Shows a T3 thread, read through T3.
+    /// Shows a T3 thread, read through T3; what it said when last read until then.
     fn open_thread(&mut self, agent: hc::Agent) {
         if let Some(i) = self.images.as_mut() {
             i.forget();
         }
-        self.shown = Shown::Thread { agent, turns: vec![], view: sessionui::View::at_end() };
+        let turns = self.read.get(&agent.address).cloned().unwrap_or_default();
+        self.shown = Shown::Thread { agent, turns, view: sessionui::View::at_end() };
         self.load_thread();
+    }
+
+    /// The T3 threads beside a conversation, newest first, the one being read among them.
+    fn side_threads(&self) -> Vec<hc::Agent> {
+        let mut threads: Vec<hc::Agent> = self.agents.iter().filter(|a| t3::owns(&a.address)).cloned().collect();
+        if let Some(r) = self.reply_to() {
+            if !threads.iter().any(|a| a.address == r.address) {
+                threads.push(r);
+            }
+        }
+        threads.sort_by_key(|a| std::cmp::Reverse(a.at));
+        threads
+    }
+
+    /// Whether the thread list is drawn beside the conversation, `w` columns wide.
+    fn side_shows(&self, w: u16) -> bool {
+        (self.side.cursor.is_some() || !self.side.hidden && w >= ui::side::FROM) && self.agents.iter().any(|a| t3::owns(&a.address))
     }
 
     /// Reads the thread shown again, off the UI thread.
@@ -1140,6 +1175,9 @@ fn run(
                     app.rebuild();
                 }
                 Msg::Thread { id, turns } => {
+                    if let Ok(t) = &turns {
+                        app.read.insert(id.clone(), t.clone());
+                    }
                     if let Shown::Thread { agent, turns: shown, .. } = &mut app.shown {
                         if agent.address == id {
                             match turns {
@@ -1365,9 +1403,68 @@ fn music_act(app: &mut App, act: Act) {
     }
 }
 
+/// The keys of the thread list beside a conversation, while it has them.
+fn side_act(app: &mut App, act: Act) {
+    let threads = app.side_threads();
+    let at = threads.iter().position(|a| Some(&a.address) == app.side.cursor.as_ref()).unwrap_or(0);
+    match act {
+        Act::Down | Act::Up if !threads.is_empty() => {
+            let by = if act == Act::Down { 1 } else { -1 };
+            let next = (at as isize + by).clamp(0, threads.len() as isize - 1) as usize;
+            app.side.cursor = Some(threads[next].address.clone());
+        }
+        Act::Into => {
+            app.side.cursor = None;
+            if let Some(a) = threads.get(at) {
+                if app.reply_to().is_none_or(|r| r.address != a.address) {
+                    app.open_thread(a.clone());
+                }
+            }
+        }
+        Act::Threads => app.side.cursor = None,
+        Act::Leave => {
+            app.side.cursor = None;
+            app.shown = Shown::Board;
+        }
+        _ => {}
+    }
+}
+
 /// The keys of a session being read.
 fn session_act(app: &mut App, act: Act) {
+    if app.side.cursor.is_some() {
+        return side_act(app, act);
+    }
     match act {
+        Act::Threads => {
+            let threads = app.side_threads();
+            if threads.is_empty() {
+                app.note = Some("no T3 threads to switch to".into());
+                return;
+            }
+            app.side.hidden = false;
+            let reading = app.reply_to().map(|a| a.address);
+            app.side.cursor = reading.filter(|r| threads.iter().any(|a| a.address == *r)).or(Some(threads[0].address.clone()));
+            return;
+        }
+        Act::Sidebar => {
+            app.side.hidden = !app.side.hidden;
+            return;
+        }
+        Act::NextThread | Act::PrevThread => {
+            let threads = app.side_threads();
+            let reading = app.reply_to().map(|a| a.address);
+            let at = threads.iter().position(|a| Some(&a.address) == reading.as_ref());
+            let next = match (at, act == Act::NextThread) {
+                (Some(i), true) => i + 1,
+                (Some(i), false) => i.wrapping_sub(1),
+                (None, _) => 0,
+            };
+            if let Some(a) = threads.get(next) {
+                app.open_thread(a.clone());
+            }
+            return;
+        }
         Act::Tell => {
             if let Some(to) = app.reply_to() {
                 app.view.mode = Mode::Tell { to, text: String::new() };
@@ -1935,6 +2032,9 @@ fn draw(term: &mut ratatui::DefaultTerminal, app: &mut App) -> std::io::Result<(
         _ => None,
     };
     let places = places_now(&app.places());
+    let side_threads = app.side_threads();
+    let reading = app.reply_to().map(|a| a.address);
+    let side_shows = app.side_shows(term.size().map_or(0, |s| s.width));
     if let Shown::Session { id, agent, view } = &mut app.shown {
         // on_sessions keeps the one shown on the board, and a session's
         // agents stay in it.
@@ -1947,8 +2047,18 @@ fn draw(term: &mut ratatui::DefaultTerminal, app: &mut App) -> std::io::Result<(
         let note = app.note.as_deref();
         let images = app.images.as_mut();
         let (finder, statuses) = (app.finder.as_mut(), statuses(&app.agents));
+        let threads = side_threads;
+        let side = ui::side::Side { threads: &threads, reading: reading.as_deref(), cursor: app.side.cursor.as_deref() };
         return term.draw(|f| {
-            sessionui::draw(f, &t, now, view, &places, note, images);
+            let area = f.area();
+            if side_shows {
+                let w = ui::side::WIDTH.min(area.width / 3);
+                ui::side::draw(f, ratatui::layout::Rect { width: w, ..area }, &side, now);
+                let rest = ratatui::layout::Rect { x: area.x + w + 1, width: area.width - w - 1, ..area };
+                sessionui::draw_in(f, rest, &t, now, view, &places, note, images);
+            } else {
+                sessionui::draw(f, &t, now, view, &places, note, images);
+            }
             reply_box(f, tell.as_ref());
             if let Some(fd) = finder {
                 ui::finder::draw(f, fd, &statuses, now);
@@ -1967,8 +2077,18 @@ fn draw(term: &mut ratatui::DefaultTerminal, app: &mut App) -> std::io::Result<(
         let note = app.note.as_deref();
         let images = app.images.as_mut();
         let (finder, statuses) = (app.finder.as_mut(), statuses(&app.agents));
+        let threads = side_threads;
+        let side = ui::side::Side { threads: &threads, reading: reading.as_deref(), cursor: app.side.cursor.as_deref() };
         return term.draw(|f| {
-            sessionui::draw(f, &t, now, view, &places, note, images);
+            let area = f.area();
+            if side_shows {
+                let w = ui::side::WIDTH.min(area.width / 3);
+                ui::side::draw(f, ratatui::layout::Rect { width: w, ..area }, &side, now);
+                let rest = ratatui::layout::Rect { x: area.x + w + 1, width: area.width - w - 1, ..area };
+                sessionui::draw_in(f, rest, &t, now, view, &places, note, images);
+            } else {
+                sessionui::draw(f, &t, now, view, &places, note, images);
+            }
             reply_box(f, tell.as_ref());
             if let Some(fd) = finder {
                 ui::finder::draw(f, fd, &statuses, now);

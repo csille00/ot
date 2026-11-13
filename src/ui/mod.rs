@@ -4,6 +4,7 @@ pub mod finder;
 pub mod md;
 pub mod music;
 pub mod session;
+pub mod side;
 
 use crate::model::Tone;
 use ratatui::layout::Rect;

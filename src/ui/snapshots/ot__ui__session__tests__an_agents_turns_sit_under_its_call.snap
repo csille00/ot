@@ -1,5 +1,6 @@
 ---
 source: src/ui/session.rs
+assertion_line: 426
 expression: "frame_of(0, 80, 14, |_| {})"
 ---
  ot  A fresh board                                     working  ·  1m  ·  $1.25
@@ -15,4 +16,4 @@ expression: "frame_of(0, 80, 14, |_| {})"
              · reading src/main.rs
 
     agent    The fetcher is fine. One note on the writer.                  1m
-  G end  q back
+  G end  q back  tab threads

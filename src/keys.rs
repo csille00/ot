@@ -39,6 +39,11 @@ pub enum Act {
     Settle,
     /// Find any T3 thread by its title or what was said in it.
     Find,
+    /// The thread list beside a conversation: into it and out, shown or not.
+    Threads,
+    Sidebar,
+    NextThread,
+    PrevThread,
     /// Open a row's ticket in Linear.
     Ticket,
     /// The music screen.
@@ -130,6 +135,8 @@ pub enum Place {
     Transcript,
     /// Reading a T3 thread, which takes a reply.
     Reply,
+    /// In the thread list beside a conversation.
+    Side,
     /// On the music screen.
     Music,
     /// On a search's results there.
@@ -255,6 +262,18 @@ pub const KEYS: &[Key] = &[
     k("w", "T3", "open the thread in T3, or copy its link over ssh", &[Reply], Act::Web),
     k("x", "stop", "stop the thread's running turn, once you say y", &[Reply], Act::Stop),
     k("q", "back", "back to the board", &[Transcript], Act::Leave),
+    k("tab", "threads", "into the thread list beside it, to switch threads", &[Transcript], Act::Threads),
+    k("]", "", "the next thread in the list", &[Transcript], Act::NextThread),
+    k("[", "", "the thread before in the list", &[Transcript], Act::PrevThread),
+    k("b", "", "show or hide the thread list", &[Transcript], Act::Sidebar),
+    k("j", "", "next thread", &[Side], Act::Down),
+    k("k", "", "previous thread", &[Side], Act::Up),
+    k("down", "", "next thread", &[Side], Act::Down),
+    k("up", "", "previous thread", &[Side], Act::Up),
+    k("enter", "open", "read the thread", &[Side], Act::Into),
+    k("tab", "back", "back to the conversation", &[Side], Act::Threads),
+    k("esc", "", "back to the conversation", &[Side], Act::Threads),
+    k("q", "", "back to the board", &[Side], Act::Leave),
     k(
         "M",
         "",
