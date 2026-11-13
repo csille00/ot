@@ -16,6 +16,8 @@ seam-core = { path = "seam-core" }
 unicode-width = "0.2"
 ureq = { version = "3", features = ["json"] }
 sha1_smol = "1.0.1"
+portable-pty = "0.9"
+vt100 = "0.18"
 
 [dev-dependencies]
 insta = "1"

@@ -3,12 +3,8 @@
 use crate::claude::{Turn, Who};
 use crate::hc::Agent;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 const SCRIPT: &str = include_str!("../nvim/compose.lua");
-
-/// Turns of the conversation drawn behind the draft.
-const CONTEXT: usize = 30;
 
 /// A reply being written to `to`.
 pub struct Compose {
@@ -27,19 +23,17 @@ fn cache() -> PathBuf {
     PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".cache/ot")
 }
 
-/// The draft to `to`, as left last time, and what nvim needs to show it; `plain` when
-/// it has a pane of its own, with no conversation behind it.
-pub fn prepare(to: &Agent, turns: &[Turn], plain: bool) -> Result<Compose, String> {
+/// The draft to `to`, as left last time, and what nvim needs to show it.
+pub fn prepare(to: &Agent) -> Result<Compose, String> {
     let dir = cache().join("compose");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let name: String = to.address.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect();
     let draft = dir.join(format!("{name}.md"));
-    let (meta, sent, context) = (dir.join(format!("{name}.json")), dir.join(format!("{name}.sent")), dir.join(format!("{name}.context.md")));
+    let (meta, sent) = (dir.join(format!("{name}.json")), dir.join(format!("{name}.sent")));
     let _ = std::fs::remove_file(&sent);
     if !draft.exists() {
         std::fs::write(&draft, "").map_err(|e| e.to_string())?;
     }
-    std::fs::write(&context, conversation(&to.name, turns)).map_err(|e| e.to_string())?;
     let script = crate::nvim::scratch().join("compose.lua");
     std::fs::create_dir_all(crate::nvim::scratch()).map_err(|e| e.to_string())?;
     std::fs::write(&script, SCRIPT).map_err(|e| e.to_string())?;
@@ -47,16 +41,10 @@ pub fn prepare(to: &Agent, turns: &[Turn], plain: bool) -> Result<Compose, Strin
         "title": format!("reply to {}", to.name),
         "draft": draft,
         "sent": sent,
-        "context": context,
         "paste": paste_dir(),
-        "plain": plain,
     });
     std::fs::write(&meta, m.to_string()).map_err(|e| e.to_string())?;
     Ok(Compose { to: to.clone(), draft, meta, sent })
-}
-
-fn conversation(name: &str, turns: &[Turn]) -> String {
-    markdown(name, turns, CONTEXT)
 }
 
 /// The conversation as markdown, its last `most` things said.
@@ -91,14 +79,8 @@ pub fn reader(name: &str, turns: &[Turn]) -> Result<Vec<String>, String> {
     ])
 }
 
-/// nvim on the draft, with your config.
-pub fn nvim(c: &Compose) -> Command {
-    let mut cmd = Command::new("nvim");
-    cmd.args(nvim_args(c));
-    cmd
-}
-
-fn nvim_args(c: &Compose) -> Vec<String> {
+/// nvim's arguments for the draft, with your config.
+pub fn nvim_args(c: &Compose) -> Vec<String> {
     let script = crate::nvim::scratch().join("compose.lua");
     vec![
         "--cmd".into(),
@@ -107,14 +89,6 @@ fn nvim_args(c: &Compose) -> Vec<String> {
         format!("lua dofile('{}')", script.display()),
         c.draft.display().to_string(),
     ]
-}
-
-/// The same in a floating zellij pane over ot, which returns once the pane closes.
-pub fn zellij(c: &Compose, cwd: &Path) -> Command {
-    let mut cmd = Command::new("zellij");
-    cmd.args(["action", "new-pane", "--floating", "--close-on-exit", "--blocking", "--width", "60%", "--height", "45%", "--x", "20%", "--y", "25%"]);
-    cmd.arg("--name").arg(format!("reply to {}", c.to.name)).arg("--cwd").arg(cwd).arg("--").arg("nvim").args(nvim_args(c));
-    cmd
 }
 
 /// What :w sent, as text and the images it names; None when nvim was left without it.
@@ -194,6 +168,7 @@ mod tests {
 #[cfg(test)]
 mod nvim_tests {
     use super::*;
+    use std::process::Command;
 
     fn agent() -> Agent {
         Agent { address: format!("test-{}", std::process::id()), name: "billing".into(), status: crate::hc::Status::Stopped, said: String::new(), at: 0, pid: None, branch: String::new() }
@@ -218,10 +193,10 @@ mod nvim_tests {
             return;
         }
         let turns = vec![Turn { who: Who::Claude, text: "Done.".into(), at: 0, times: 1, agent: None }];
-        let c = prepare(&agent(), &turns, false).unwrap();
+        let c = prepare(&agent()).unwrap();
         run(&c, &["call setline(1, 'kept for later')", "q"]);
         assert!(written(&c).is_none(), ":q sends nothing");
-        let c = prepare(&agent(), &turns, false).unwrap();
+        let c = prepare(&agent()).unwrap();
         assert_eq!(std::fs::read_to_string(&c.draft).unwrap().trim(), "kept for later", "the draft comes back");
         run(&c, &["call setline(1, 'ship it')", "w"]);
         assert_eq!(written(&c).map(|w| w.0), Some("ship it".to_string()));
@@ -236,7 +211,7 @@ mod nvim_tests {
         }
         let mut a = agent();
         a.address.push_str("-img");
-        let c = prepare(&a, &[], true).unwrap();
+        let c = prepare(&a).unwrap();
         let name = format!("paste-test-{}.png", std::process::id());
         let shot = paste_dir().join(&name);
         // As the Mac's script sends it: under a dot name, then renamed.

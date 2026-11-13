@@ -21,6 +21,7 @@ mod linear;
 mod model;
 mod music;
 mod nvim;
+mod popup;
 mod rebase;
 mod review;
 mod slack;
@@ -127,8 +128,8 @@ enum Msg {
     },
     /// How something asked of one of hc's agents went, for the note.
     Asked(String),
-    /// A reply's nvim, in its zellij pane, is done.
-    Composed(compose::Compose),
+    /// The reply's nvim, in its box over ot, drew; or, true, has exited.
+    Popup(bool),
     /// A T3 thread started with `text`, its id, or why it wasn't.
     Started {
         text: String,
@@ -303,6 +304,8 @@ struct App {
     said: HashMap<String, (bool, String)>,
     /// Each MR's diff as read, by its number, with the head it was read at.
     patches: HashMap<u64, (String, Result<String, String>)>,
+    /// A reply being written in nvim, in a box over ot that has every key.
+    popup: Option<(popup::Popup, compose::Compose)>,
 }
 
 /// The MR panel beside a thread: hidden by m, and where its diff is.
@@ -383,6 +386,7 @@ impl App {
             panel: Panel::default(),
             said: HashMap::new(),
             patches: HashMap::new(),
+            popup: None,
         };
         app.rebuild();
         app.view.top(&app.board);
@@ -1285,7 +1289,25 @@ fn run(
                     app.rebuild();
                     app.read_said();
                 }
-                Msg::Composed(c) => send_composed(app, c),
+                Msg::Popup(false) => {}
+                Msg::Popup(true) => {
+                    if let Some((p, c)) = app.popup.take() {
+                        p.close();
+                        send_composed(app, c);
+                    }
+                }
+                Msg::Term(Event::Key(k)) if app.popup.is_some() => {
+                    if k.kind != KeyEventKind::Release {
+                        if let Some((p, _)) = app.popup.as_mut() {
+                            p.key(&k);
+                        }
+                    }
+                }
+                Msg::Term(Event::Paste(text)) if app.popup.is_some() => {
+                    if let Some((p, _)) = app.popup.as_mut() {
+                        p.paste(&text);
+                    }
+                }
                 Msg::Started { text, result } => match result {
                     Ok(id) => {
                         app.note = None;
@@ -1355,7 +1377,7 @@ fn run(
                         Next::Quit => return Ok(()),
                         Next::Review(open) => review_in_nvim(term, &lend, app, open),
                         Next::Attach(agent) if t3::owns(&agent.address) => app.open_thread(agent),
-                        Next::Compose(to) => compose_reply(term, &lend, app, to),
+                        Next::Compose(to) => compose_reply(term, app, to),
                         Next::Nvim(args) => {
                             let mut nvim = Command::new("nvim");
                             nvim.args(&args);
@@ -1446,35 +1468,29 @@ fn key(app: &mut App, name: &str) -> Next {
     Next::Stay
 }
 
-/// A reply written in nvim: a floating zellij pane over ot inside zellij, else this
-/// terminal until nvim quits. :w in it sends the reply.
-fn compose_reply(term: &mut ratatui::DefaultTerminal, lend: &Sender<Lend>, app: &mut App, to: hc::Agent) {
-    let turns = match &app.shown {
-        Shown::Thread { agent, turns, .. } if agent.address == to.address => turns.clone(),
-        Shown::Session { id, .. } => app.sessions.iter().find(|s| s.id == *id).map(|s| s.turns.clone()).unwrap_or_default(),
-        _ => app.read.get(&to.address).cloned().unwrap_or_default(),
-    };
-    let in_zellij = std::env::var_os("ZELLIJ").is_some();
-    let c = match compose::prepare(&to, &turns, in_zellij) {
+/// A reply written in nvim, in a box over ot, which has every key until nvim quits.
+/// :w in it sends the reply.
+fn compose_reply(term: &mut ratatui::DefaultTerminal, app: &mut App, to: hc::Agent) {
+    let c = match compose::prepare(&to) {
         Ok(c) => c,
         Err(e) => {
             app.note = Some(format!("can't write a reply: {e}"));
             return;
         }
     };
-    if in_zellij {
-        let cwd = std::env::current_dir().unwrap_or_default();
-        let tx = app.tx.clone();
-        std::thread::spawn(move || {
-            let _ = compose::zellij(&c, &cwd).status();
-            let _ = tx.send(Msg::Composed(c));
-        });
-        return;
+    let mut cmd = portable_pty::CommandBuilder::new("nvim");
+    cmd.args(compose::nvim_args(&c));
+    if let Ok(cwd) = std::env::current_dir() {
+        cmd.cwd(cwd);
     }
-    if let Err(e) = lend_terminal(term, lend, compose::nvim(&c)) {
-        app.note = Some(e);
+    let area = term.size().map(|s| ratatui::layout::Rect::new(0, 0, s.width, s.height)).unwrap_or_default();
+    let tx = app.tx.clone();
+    match popup::Popup::open(cmd, format!("reply to {}", to.name), area, move |done| {
+        let _ = tx.send(Msg::Popup(done));
+    }) {
+        Ok(p) => app.popup = Some((p, c)),
+        Err(e) => app.note = Some(format!("can't open nvim: {e}")),
     }
-    send_composed(app, c);
 }
 
 /// Sends what :w wrote, its images attached for a T3 thread; else the draft stays.
@@ -2445,6 +2461,10 @@ fn lend_terminal(
 }
 
 fn draw(term: &mut ratatui::DefaultTerminal, app: &mut App) -> std::io::Result<()> {
+    if let (Some((p, _)), Ok(s)) = (app.popup.as_mut(), term.size()) {
+        p.fit(ratatui::layout::Rect::new(0, 0, s.width, s.height));
+    }
+    let pop = app.popup.as_ref().map(|(p, _)| p.shows());
     if let Shown::Music(view) = &app.shown {
         return term
             .draw(|f| {
@@ -2506,6 +2526,9 @@ fn draw(term: &mut ratatui::DefaultTerminal, app: &mut App) -> std::io::Result<(
             if let Some(fd) = finder {
                 ui::finder::draw(f, fd, &statuses, now);
             }
+            if let Some(p) = &pop {
+                popup::draw(f, p);
+            }
         })
         .map(|_| ());
     }
@@ -2541,6 +2564,9 @@ fn draw(term: &mut ratatui::DefaultTerminal, app: &mut App) -> std::io::Result<(
             reply_box(f, tell.as_ref());
             if let Some(fd) = finder {
                 ui::finder::draw(f, fd, &statuses, now);
+            }
+            if let Some(p) = &pop {
+                popup::draw(f, p);
             }
         })
         .map(|_| ());
@@ -2579,6 +2605,9 @@ fn draw(term: &mut ratatui::DefaultTerminal, app: &mut App) -> std::io::Result<(
         }
         if let Some(fd) = app.finder.as_mut() {
             ui::finder::draw(f, fd, &statuses, s.now);
+        }
+        if let Some(p) = &pop {
+            popup::draw(f, p);
         }
     })?;
     Ok(())
