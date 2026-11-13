@@ -42,7 +42,7 @@ pub fn bin() -> Option<PathBuf> {
 }
 
 /// T3's home: T3CODE_HOME, else ~/.t3.
-fn home() -> Option<PathBuf> {
+pub fn home() -> Option<PathBuf> {
     std::env::var_os("T3CODE_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".t3")))

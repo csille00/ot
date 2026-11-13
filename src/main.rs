@@ -9,6 +9,7 @@ mod brief;
 mod cache;
 mod claude;
 mod config;
+mod finder;
 mod git;
 mod gitlab;
 mod hc;
@@ -265,6 +266,8 @@ struct App {
     told: BTreeMap<String, String>,
     /// The terminal has focus, as far as it has said.
     focused: bool,
+    /// The thread finder, over whatever is up, while it is open.
+    finder: Option<finder::Finder>,
 }
 
 impl App {
@@ -324,6 +327,7 @@ impl App {
             briefs: brief::Briefs::default(),
             told: BTreeMap::new(),
             focused: true,
+            finder: None,
         };
         app.rebuild();
         app.view.top(&app.board);
@@ -401,6 +405,9 @@ impl App {
     /// places whose keys work there (keys.rs); None while a question or an
     /// input has the keys.
     fn places(&self) -> Option<(&'static str, Vec<keys::Place>)> {
+        if self.finder.is_some() {
+            return None;
+        }
         match &self.shown {
             Shown::Music(view) => match view.search {
                 musicui::Search::Typing(_) => None,
@@ -964,6 +971,15 @@ impl App {
         }
     }
 
+    /// Shows a T3 thread, read through T3.
+    fn open_thread(&mut self, agent: hc::Agent) {
+        if let Some(i) = self.images.as_mut() {
+            i.forget();
+        }
+        self.shown = Shown::Thread { agent, turns: vec![], view: sessionui::View::at_end() };
+        self.load_thread();
+    }
+
     /// Reads the thread shown again, off the UI thread.
     fn load_thread(&self) {
         if let Shown::Thread { agent, .. } = &self.shown {
@@ -1169,13 +1185,7 @@ fn run(
                         Next::Stay => {}
                         Next::Quit => return Ok(()),
                         Next::Review(open) => review_in_nvim(term, &lend, app, open),
-                        Next::Attach(agent) if t3::owns(&agent.address) => {
-                            if let Some(i) = app.images.as_mut() {
-                                i.forget();
-                            }
-                            app.shown = Shown::Thread { agent, turns: vec![], view: sessionui::View::at_end() };
-                            app.load_thread();
-                        }
+                        Next::Attach(agent) if t3::owns(&agent.address) => app.open_thread(agent),
                         Next::Attach(agent) => match lend_terminal(term, &lend, hc::attach(&agent.address)) {
                             Ok(left) if left.success() => {}
                             Ok(_) => app.note = Some(format!("hc couldn't attach to {}", agent.name)),
@@ -1218,6 +1228,10 @@ fn key(app: &mut App, name: &str) -> Next {
     if let Shown::Music(view) = &mut app.shown {
         view.said = None;
     }
+    if app.finder.is_some() {
+        find_typed(app, name);
+        return Next::Stay;
+    }
     let Some((_, places)) = app.places() else {
         match &app.shown {
             Shown::Music(_) => search_typed(app, name),
@@ -1236,10 +1250,45 @@ fn key(app: &mut App, name: &str) -> Next {
     Next::Stay
 }
 
+/// A key for the thread finder: moves, enter opens, esc closes, the rest is the query.
+fn find_typed(app: &mut App, name: &str) {
+    let Some(f) = app.finder.as_mut() else { return };
+    match name {
+        "esc" | "ctrl-c" => app.finder = None,
+        "down" | "ctrl-n" | "ctrl-j" => f.step(1),
+        "up" | "ctrl-p" | "ctrl-k" => f.step(-1),
+        "ctrl-u" => {
+            f.query.clear();
+            f.search();
+        }
+        "enter" => {
+            let Some(t) = f.picked().cloned() else { return };
+            app.finder = None;
+            let known = app.agents.iter().find(|a| a.address == t.id).cloned();
+            let agent = known.unwrap_or(hc::Agent {
+                name: t.title,
+                said: String::new(),
+                status: hc::Status::Stopped,
+                at: t.updated,
+                pid: None,
+                branch: t.branch,
+                address: t.id,
+            });
+            app.open_thread(agent);
+        }
+        _ => f.typed(name),
+    }
+}
+
 /// A paste goes into what you are typing as one line, and nowhere else:
 /// taken as keys, its line ends would send what is typed and the rest
 /// would act on the board.
 fn pasted(app: &mut App, text: &str) {
+    if let Some(f) = app.finder.as_mut() {
+        f.query.push_str(&text.split_whitespace().collect::<Vec<_>>().join(" "));
+        f.search();
+        return;
+    }
     let into = match (&mut app.shown, &mut app.view.mode) {
         (Shown::Music(view), _) => match &mut view.search {
             musicui::Search::Typing(typed) => typed,
@@ -1342,6 +1391,10 @@ fn session_act(app: &mut App, act: Act) {
                 settle(app, a);
                 app.shown = Shown::Board;
             }
+            return;
+        }
+        Act::Find => {
+            app.finder = Some(finder::Finder::open());
             return;
         }
         _ => {}
@@ -1533,6 +1586,7 @@ fn board_act(app: &mut App, act: Act) -> Next {
             }
         }
         Act::Music => app.shown = Shown::Music(musicui::View::default()),
+        Act::Find => app.finder = Some(finder::Finder::open()),
         Act::Read => {
             if let Some(Pick::Session(id)) = &app.view.at {
                 if let Some(i) = app.images.as_mut() {
@@ -1892,9 +1946,13 @@ fn draw(term: &mut ratatui::DefaultTerminal, app: &mut App) -> std::io::Result<(
         };
         let note = app.note.as_deref();
         let images = app.images.as_mut();
+        let (finder, statuses) = (app.finder.as_mut(), statuses(&app.agents));
         return term.draw(|f| {
             sessionui::draw(f, &t, now, view, &places, note, images);
             reply_box(f, tell.as_ref());
+            if let Some(fd) = finder {
+                ui::finder::draw(f, fd, &statuses, now);
+            }
         })
         .map(|_| ());
     }
@@ -1908,9 +1966,13 @@ fn draw(term: &mut ratatui::DefaultTerminal, app: &mut App) -> std::io::Result<(
         let t = sessionui::Transcript { title: agent.name.clone(), facts, turns, voices: ["you", "claude"] };
         let note = app.note.as_deref();
         let images = app.images.as_mut();
+        let (finder, statuses) = (app.finder.as_mut(), statuses(&app.agents));
         return term.draw(|f| {
             sessionui::draw(f, &t, now, view, &places, note, images);
             reply_box(f, tell.as_ref());
+            if let Some(fd) = finder {
+                ui::finder::draw(f, fd, &statuses, now);
+            }
         })
         .map(|_| ());
     }
@@ -1921,6 +1983,7 @@ fn draw(term: &mut ratatui::DefaultTerminal, app: &mut App) -> std::io::Result<(
     };
     let landing = land::said(&app.landings, &app.snap, &app.cfg.rules);
     app.width = term.size().map_or(app.width, |s| s.width as usize);
+    let statuses = statuses(&app.agents);
     term.draw(|f| {
         let s = boardui::Screen {
             snap: &app.snap,
@@ -1940,8 +2003,16 @@ fn draw(term: &mut ratatui::DefaultTerminal, app: &mut App) -> std::io::Result<(
             hills: &app.hills,
         };
         boardui::draw(f, &s, &mut app.view);
+        if let Some(fd) = app.finder.as_mut() {
+            ui::finder::draw(f, fd, &statuses, s.now);
+        }
     })?;
     Ok(())
+}
+
+/// What each T3 thread on the board is doing, for the finder's rows.
+fn statuses(agents: &[hc::Agent]) -> HashMap<String, hc::Status> {
+    agents.iter().filter(|a| t3::owns(&a.address)).map(|a| (a.address.clone(), a.status)).collect()
 }
 
 /// How often the board looks at what Claude is doing.

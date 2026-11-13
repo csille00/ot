@@ -37,6 +37,8 @@ pub enum Act {
     Stop,
     /// Settle a T3 thread.
     Settle,
+    /// Find any T3 thread by its title or what was said in it.
+    Find,
     /// Open a row's ticket in Linear.
     Ticket,
     /// The music screen.
@@ -226,6 +228,8 @@ pub const KEYS: &[Key] = &[
     k("s", "tell", "type something to the agent; enter sends it, once nobody is typing there", &[Hc], Act::Tell),
     k("x", "stop", "press the agent's stop key, once you say y", &[HcWorking], Act::Stop),
     k("S", "settle", "settle the T3 thread: T3 marks it done and it leaves the board", &[T3, Reply], Act::Settle),
+    k("ctrl-k", "", "find any T3 thread by its title or what was said in it", &[Board, Transcript], Act::Find),
+    k("/", "", "the same", &[Board, Transcript], Act::Find),
     k("l", "ticket", "open the ticket it is for in Linear", &[TicketMr], Act::Ticket),
     k("j", "", "down a line", &[Transcript], Act::Down),
     k("k", "", "up a line", &[Transcript], Act::Up),
@@ -509,6 +513,8 @@ pub fn name(ev: &KeyEvent) -> String {
         KeyCode::Backspace => "backspace".into(),
         KeyCode::Left => "left".into(),
         KeyCode::Right => "right".into(),
+        KeyCode::Up => "up".into(),
+        KeyCode::Down => "down".into(),
         _ => return String::new(),
     };
     if ev.modifiers.contains(KeyModifiers::CONTROL) {
