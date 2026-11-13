@@ -1890,6 +1890,10 @@ fn side_act(app: &mut App, act: Act) {
             let next = (at as isize + by).clamp(0, threads.len() as isize - 1) as usize;
             app.side.cursor = Some(threads[next].address.clone());
         }
+        Act::Top | Act::Bottom if !threads.is_empty() => {
+            let to = if act == Act::Top { 0 } else { threads.len() - 1 };
+            app.side.cursor = Some(threads[to].address.clone());
+        }
         Act::Into => {
             app.side.cursor = None;
             if let Some(a) = threads.get(at) {

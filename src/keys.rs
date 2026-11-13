@@ -335,6 +335,8 @@ pub const KEYS: &[Key] = &[
     k("k", "", "previous thread", &[Side], Act::Up),
     k("down", "", "next thread", &[Side], Act::Down),
     k("up", "", "previous thread", &[Side], Act::Up),
+    k("g", "", "first thread", &[Side], Act::Top),
+    k("G", "", "last thread: the newest at work", &[Side], Act::Bottom),
     k("enter", "open", "read the thread", &[Side], Act::Into),
     k("tab", "back", "back to the conversation", &[Side], Act::Threads),
     k("esc", "", "back to the conversation", &[Side], Act::Threads),
