@@ -6,9 +6,10 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 use ratatui::Frame;
+use std::collections::HashMap;
 
 /// How wide the list is, its border included.
-pub const WIDTH: u16 = 44;
+pub const WIDTH: u16 = 34;
 
 /// Narrower than this, the conversation keeps the whole screen.
 pub const FROM: u16 = 100;
@@ -16,6 +17,9 @@ pub const FROM: u16 = 100;
 /// The list: its threads, the one you are reading, and the cursor while it has the keys.
 pub struct Side<'a> {
     pub threads: &'a [Agent],
+    /// By thread: its MR ("!78877"), and the last thing said in it, by you or not.
+    pub mrs: &'a HashMap<String, String>,
+    pub said: &'a HashMap<String, (bool, String)>,
     pub reading: Option<&'a str>,
     pub cursor: Option<&'a str>,
 }
@@ -36,11 +40,12 @@ pub fn draw(f: &mut Frame, area: Rect, s: &Side, now: i64) {
     let rows = area.height.saturating_sub(2) as usize;
     let mark = s.cursor.or(s.reading);
     let at = mark.and_then(|m| s.threads.iter().position(|a| a.address == m)).unwrap_or(0);
-    // Each thread is its title on up to two lines, its time on the first.
+    // Each thread is its title, how it stands and its MR, and the last thing said,
+    // then a blank line.
     let room = w.saturating_sub(3 + 5);
-    let lines: Vec<Vec<String>> = s.threads.iter().map(|a| two_lines(&a.name, room)).collect();
+    let lines: Vec<Vec<(String, Style)>> = s.threads.iter().map(|a| entry(a, s, room)).collect();
     let mut top = 0;
-    while top < at && lines[top..=at].iter().map(Vec::len).sum::<usize>() > rows {
+    while top < at && lines[top..=at].iter().map(|l| l.len() + 1).sum::<usize>() > rows + 1 {
         top += 1;
     }
     let mut y = area.y + 2;
@@ -56,14 +61,14 @@ pub fn draw(f: &mut Frame, area: Rect, s: &Side, now: i64) {
             Status::Blocked => ("◐", AMBER),
             Status::Stopped => ("○", DIM),
         };
-        let name = if reading { bg.fg(TEAL).add_modifier(Modifier::BOLD) } else { bg.fg(TEXT) };
-        for (k, part) in lines[i].iter().enumerate() {
+        for (k, (part, style)) in lines[i].iter().enumerate() {
             let mut o = Out::default();
-            let edge = if on { "▌" } else if reading && k == 0 { "▸" } else { " " };
+            let edge = if on { "▌" } else if reading { "▎" } else { " " };
             o.put(edge, bg.fg(if on { AMBER } else { TEAL }));
             o.put(if k == 0 { glyph } else { " " }, bg.fg(color));
             o.put(" ", bg);
-            o.put(part, if k == 0 { name } else { name.patch(fg(DIM)) });
+            let style = if k == 0 && reading { style.fg(TEAL) } else { *style };
+            o.put(part, bg.patch(style));
             if k == 0 {
                 let when = ago(now - a.at);
                 pad(&mut o, w.saturating_sub(width(&when) + 1), bg);
@@ -73,7 +78,30 @@ pub fn draw(f: &mut Frame, area: Rect, s: &Side, now: i64) {
             f.render_widget(o.line(), Rect::new(area.x, y, w as u16, 1));
             y += 1;
         }
+        y += 1;
     }
+}
+
+/// A thread's lines in the list: its title on up to two, how it stands, then up to two
+/// of what was last said.
+fn entry(a: &Agent, s: &Side, w: usize) -> Vec<(String, Style)> {
+    let title = fg(TEXT).add_modifier(Modifier::BOLD);
+    let mut out: Vec<(String, Style)> = two_lines(&a.name, w).into_iter().map(|l| (l, title)).collect();
+    let word = match a.status {
+        Status::Working => "working",
+        Status::Blocked => "waiting on you",
+        Status::Stopped => "done",
+    };
+    let mut stands = word.to_string();
+    if let Some(mr) = s.mrs.get(&a.address) {
+        stands.push_str(&format!(" · {mr}"));
+    }
+    out.push((cut(&stands, w), fg(DIM)));
+    if let Some((you, text)) = s.said.get(&a.address) {
+        let said = format!("{}{text}", if *you { "you: " } else { "" });
+        out.extend(two_lines(&said, w + 2).into_iter().map(|l| (l, fg(FAINT))));
+    }
+    out
 }
 
 /// `s` wrapped to `w` on at most two lines, the second cut short if it must be.
@@ -106,4 +134,5 @@ fn cut(s: &str, w: usize) -> String {
     out.push('…');
     out
 }
+
 

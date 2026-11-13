@@ -233,6 +233,47 @@ fn said(db: &Connection, id: &str) -> rusqlite::Result<Vec<Said>> {
     Ok(said)
 }
 
+/// The last thing said in each of `ids`, by you or not, read straight from T3's database.
+pub fn latest(ids: &[&str]) -> HashMap<String, (bool, String)> {
+    let Ok(db) = connect() else { return HashMap::new() };
+    let Ok(mut stmt) = db.prepare(
+        "SELECT role = 'user', json_extract(payload_json, '$.text') FROM orchestration_v2_projection_messages
+          WHERE thread_id = ?1 AND role IN ('user', 'assistant') AND COALESCE(json_extract(payload_json, '$.text'), '') != ''
+          ORDER BY created_at DESC LIMIT 1",
+    ) else {
+        return HashMap::new();
+    };
+    ids.iter()
+        .filter_map(|id| {
+            let said = stmt.query_row([id], |r| Ok((r.get::<_, bool>(0)?, r.get::<_, String>(1)?))).ok()?;
+            Some((id.to_string(), (said.0, plain(&said.1))))
+        })
+        .collect()
+}
+
+/// Markdown as one line of what it reads: links as their text, no marks for emphasis or code.
+pub fn plain(md: &str) -> String {
+    let mut out = String::new();
+    let mut rest = md;
+    while let Some(i) = rest.find('[') {
+        out.push_str(&rest[..i]);
+        let after = &rest[i + 1..];
+        match after.find("](").and_then(|j| after[j + 2..].find(')').map(|k| (j, j + 2 + k))) {
+            Some((j, end)) if !after[..j].contains('\n') => {
+                out.push_str(&after[..j]);
+                rest = &after[end + 1..];
+            }
+            _ => {
+                out.push('[');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    let out: String = out.chars().filter(|c| !matches!(c, '`' | '*' | '#')).collect();
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// One line of `text` from a little before the first term it holds.
 pub fn snippet(text: &str, terms: &[&str]) -> String {
     let flat: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -381,6 +422,12 @@ mod tests {
         f.query = "!78877".into();
         f.search();
         assert_eq!(f.rows[0].marks, [0, 1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn plain_reads_links_as_their_text() {
+        assert_eq!(plain("A fix is open: [!78883](https://gitlab.com/x/-/merge_requests/78883), **merged**\n`soon`"), "A fix is open: !78883, merged soon");
+        assert_eq!(plain("a [b] c"), "a [b] c");
     }
 
     #[test]

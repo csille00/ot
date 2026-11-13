@@ -285,6 +285,8 @@ struct App {
     read: HashMap<String, Vec<claude::Turn>>,
     /// The MR panel beside a thread.
     panel: Panel,
+    /// The last thing said in each T3 thread, for the thread list.
+    said: HashMap<String, (bool, String)>,
     /// Each MR's diff as read, by its number, with the head it was read at.
     patches: HashMap<u64, (String, Result<String, String>)>,
 }
@@ -365,6 +367,7 @@ impl App {
             side: Side::default(),
             read: HashMap::new(),
             panel: Panel::default(),
+            said: HashMap::new(),
             patches: HashMap::new(),
         };
         app.rebuild();
@@ -1038,6 +1041,24 @@ impl App {
         self.load_thread();
     }
 
+    /// What was last said in each T3 thread, for the thread list, from T3's database.
+    fn read_said(&mut self) {
+        let ids: Vec<&str> = self.agents.iter().filter(|a| t3::owns(&a.address)).map(|a| a.address.as_str()).collect();
+        self.said = finder::latest(&ids);
+    }
+
+    /// The MR each thread in the list is on, as "!78877".
+    fn side_mrs(&self, threads: &[hc::Agent]) -> HashMap<String, String> {
+        threads
+            .iter()
+            .filter_map(|a| {
+                let opened = t3::mr(&a.address, &self.cfg.project).and_then(|iid| self.snap.mr(iid));
+                let m = opened.or_else(|| self.snap.mrs.iter().find(|m| !a.branch.is_empty() && m.source == a.branch && m.reach.is_none()))?;
+                Some((a.address.clone(), format!("!{}", m.iid)))
+            })
+            .collect()
+    }
+
     /// The MR of the thread being read: the one it opened, else the one its own branch is.
     fn thread_mr(&self) -> Option<&model::Mr> {
         let a = self.reply_to()?;
@@ -1234,6 +1255,7 @@ fn run(
                     }
                     app.agents = agents;
                     app.rebuild();
+                    app.read_said();
                 }
                 Msg::Started { text, result } => match result {
                     Ok(id) => {
@@ -2204,6 +2226,7 @@ fn draw(term: &mut ratatui::DefaultTerminal, app: &mut App) -> std::io::Result<(
     };
     let places = places_now(&app.places());
     let side_threads = app.side_threads();
+    let side_mrs = app.side_mrs(&side_threads);
     let reading = app.reply_to().map(|a| a.address);
     let width = term.size().map_or(0, |s| s.width);
     app.width = width as usize;
@@ -2225,7 +2248,7 @@ fn draw(term: &mut ratatui::DefaultTerminal, app: &mut App) -> std::io::Result<(
         let images = app.images.as_mut();
         let (finder, statuses) = (app.finder.as_mut(), statuses(&app.agents));
         let threads = side_threads;
-        let side = ui::side::Side { threads: &threads, reading: reading.as_deref(), cursor: app.side.cursor.as_deref() };
+        let side = ui::side::Side { threads: &threads, mrs: &side_mrs, said: &app.said, reading: reading.as_deref(), cursor: app.side.cursor.as_deref() };
         return term.draw(|f| {
             let mut area = f.area();
             if let Some((m, patch)) = panel {
@@ -2261,7 +2284,7 @@ fn draw(term: &mut ratatui::DefaultTerminal, app: &mut App) -> std::io::Result<(
         let images = app.images.as_mut();
         let (finder, statuses) = (app.finder.as_mut(), statuses(&app.agents));
         let threads = side_threads;
-        let side = ui::side::Side { threads: &threads, reading: reading.as_deref(), cursor: app.side.cursor.as_deref() };
+        let side = ui::side::Side { threads: &threads, mrs: &side_mrs, said: &app.said, reading: reading.as_deref(), cursor: app.side.cursor.as_deref() };
         return term.draw(|f| {
             let mut area = f.area();
             if let Some((m, patch)) = panel {
