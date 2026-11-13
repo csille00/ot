@@ -454,6 +454,8 @@ pub struct Board {
     pub tree: Vec<Row>,
     pub claude: Vec<Row>,
     pub not_sent: Vec<Row>,
+    /// The stacks you hid, under the board while it shows them.
+    pub hidden: Vec<Row>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -628,6 +630,7 @@ pub const QUIET: i64 = 14 * DAY;
 /// are listed with Claude's sessions, those waiting on you first, then
 /// those at work: one here that is a session is that session's row, and
 /// one that stopped leaves once it has been quiet for SHOWN_FOR.
+#[cfg(test)]
 pub fn board(
     snap: &Snapshot,
     rules: &Rules,
@@ -636,6 +639,22 @@ pub fn board(
     agents: &[hc::Agent],
     tickets: &[Ticket],
     now: i64,
+) -> Board {
+    board_hiding(snap, rules, was_on, sessions, agents, tickets, now, &HashSet::new())
+}
+
+/// The board with every stack whose MRs are all in `hidden` taken off it, into
+/// Board::hidden.
+#[allow(clippy::too_many_arguments)]
+pub fn board_hiding(
+    snap: &Snapshot,
+    rules: &Rules,
+    was_on: &HashMap<u64, u64>,
+    sessions: &[Session],
+    agents: &[hc::Agent],
+    tickets: &[Ticket],
+    now: i64,
+    hidden: &HashSet<u64>,
 ) -> Board {
     let me = snap.me.as_str();
     let (roots, children) = stacks(snap, was_on);
@@ -657,10 +676,14 @@ pub fn board(
     // Approved by you, it is off your plate: gone, unless the stack still
     // has one waiting on you.
     let done = |iid: u64| by_iid[&iid].approved_by.iter().any(|u| u == me);
-    let (mut mine, mut others, mut folded) = (vec![], vec![], vec![]);
+    let (mut mine, mut others, mut folded, mut hid) = (vec![], vec![], vec![], vec![]);
     for root in roots {
         let all = stack(root, &children);
-        if all.iter().all(|&i| quiet(i)) {
+        if all.iter().all(|i| hidden.contains(i)) {
+            if !all.iter().all(|&i| done(i)) {
+                hid.push(root);
+            }
+        } else if all.iter().all(|&i| quiet(i)) {
             folded.push(root);
         } else if all.iter().all(|&i| done(i)) {
             continue;
@@ -771,6 +794,7 @@ pub fn board(
             })
             .collect(),
         not_sent: rows.forest(&folded.into_iter().map(Top::Stack).collect::<Vec<_>>()),
+        hidden: rows.forest(&hid.into_iter().map(Top::Stack).collect::<Vec<_>>()),
     }
 }
 
@@ -857,6 +881,12 @@ pub fn layers<'a>(snap: &'a Snapshot, was_on: &HashMap<u64, u64>, iid: u64) -> (
 }
 
 /// A root and every MR stacked on it, top down.
+/// Every MR in the stack `iid` is in, from its root up.
+pub fn stack_of(snap: &Snapshot, was_on: &HashMap<u64, u64>, iid: u64) -> Vec<u64> {
+    let (roots, children) = stacks(snap, was_on);
+    roots.into_iter().map(|r| stack(r, &children)).find(|all| all.contains(&iid)).unwrap_or_else(|| vec![iid])
+}
+
 fn stack(root: u64, children: &HashMap<u64, Vec<u64>>) -> Vec<u64> {
     let mut all = vec![root];
     let mut i = 0;
@@ -1884,6 +1914,18 @@ mod tests {
                 "○ Why the parser's error paths read better apart waiting on you 25m / The errors module is done; the tests pass. Want the happy path next?",
             ]
         );
+    }
+
+    #[test]
+    fn a_hidden_stack_leaves_the_board_for_the_hidden_list() {
+        let snap = snapshot();
+        let all = stack_of(&snap, &HashMap::new(), snap.mrs[0].iid);
+        let shown = board(&snap, &rules(), &HashMap::new(), &[], &[], &[], NOW);
+        let hid = board_hiding(&snap, &rules(), &HashMap::new(), &[], &[], &[], NOW, &all.iter().copied().collect());
+        let iids = |rows: &[Row]| rows.iter().filter_map(|r| match r.item { Item::Mr { iid, .. } => Some(iid), _ => None }).collect::<Vec<_>>();
+        assert!(all.iter().all(|i| iids(&shown.tree).contains(i) || iids(&shown.not_sent).contains(i)));
+        assert!(all.iter().all(|i| !iids(&hid.tree).contains(i) && !iids(&hid.not_sent).contains(i)));
+        assert_eq!(iids(&hid.hidden).len(), all.len());
     }
 
     #[test]

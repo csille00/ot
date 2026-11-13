@@ -113,6 +113,8 @@ pub struct View {
     /// Where the cursor was in the list, to land near it when its row goes.
     index: usize,
     pub fold_open: bool,
+    /// The MRs you hid show under the board.
+    pub hidden_open: bool,
     scroll: usize,
     pub mode: Mode,
 }
@@ -148,13 +150,16 @@ impl View {
                 picks.extend(of(&b.not_sent));
             }
         }
+        if self.hidden_open {
+            picks.extend(of(&b.hidden));
+        }
         picks
     }
 
     /// The row the cursor is on.
     pub fn item<'b>(&self, b: &'b Board) -> Option<&'b Item> {
         let at = self.at.as_ref()?;
-        let rows = b.tree.iter().chain(&b.claude).chain(&b.not_sent);
+        let rows = b.tree.iter().chain(&b.claude).chain(&b.not_sent).chain(&b.hidden);
         rows.map(|r| &r.item).find(|i| pick_of(i).as_ref() == Some(at))
     }
 
@@ -699,7 +704,7 @@ fn tree(s: &Screen, v: &View, right: usize) -> (Vec<Line<'static>>, Range<usize>
     let b = s.board;
     let mut out: Vec<Line<'static>> = vec![];
     let mut cur = 0..0;
-    if b.tree.is_empty() && b.claude.is_empty() && b.not_sent.is_empty() {
+    if b.tree.is_empty() && b.claude.is_empty() && b.not_sent.is_empty() && b.hidden.is_empty() {
         if s.snap.as_of > 0 {
             out.push(Line::styled("   nothing open", fg(DIM)));
         }
@@ -749,6 +754,15 @@ fn tree(s: &Screen, v: &View, right: usize) -> (Vec<Line<'static>>, Range<usize>
         out.push(band(o.line(), on));
         if v.fold_open {
             rows(&b.not_sent, &mut out, &mut cur);
+        }
+    }
+    let n = b.hidden.iter().filter(|r| matches!(r.item, Item::Mr { .. })).count();
+    if n > 0 {
+        out.push(Line::default());
+        let (what, hint) = if v.hidden_open { ("hidden", "h brings one back · H hides them") } else { ("hidden", "H shows them") };
+        out.push(Line::from(vec![Span::styled(format!("   {n} {what}"), fg(DIM)), Span::styled(format!("  ·  {hint}"), fg(FAINT))]));
+        if v.hidden_open {
+            rows(&b.hidden, &mut out, &mut cur);
         }
     }
     (out, cur)

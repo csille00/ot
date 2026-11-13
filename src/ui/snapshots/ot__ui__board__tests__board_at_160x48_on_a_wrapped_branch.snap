@@ -1,5 +1,6 @@
 ---
 source: src/ui/board.rs
+assertion_line: 1356
 expression: "frame(160, 48, |b, v| v.step(b, 5))"
 ---
  ot  team/app                                                                                                                                       as of 13:44
@@ -49,4 +50,4 @@ expression: "frame(160, 48, |b, v| v.step(b, 5))"
   Change 106                                                                                                                                               !106
   ● answer 3 threads  ·  pipeline passed  ·  3 open threads  ·  waiting on kim  ·  +12 −3 in 2 files
  ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-  enter open  y link  w web  T tour  m merge  b rebase  N pipeline  L land  a reviewers  c cc  X close                                                   ? keys
+  enter open  y link  w web  T tour  h hide  m merge  b rebase  N pipeline  L land  a reviewers  c cc  X close                                           ? keys

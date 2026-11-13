@@ -14,6 +14,8 @@ pub enum Act {
     Bottom,
     Unfold,
     Fold,
+    Hide,
+    ShowHidden,
     Link,
     /// Copy a symbol and its path from the repo root: "total in src/sum.ts".
     Copy,
@@ -265,6 +267,8 @@ pub const KEYS: &[Key] = &[
     k("ctrl-k", "", "find any T3 thread by its title or what was said in it", &[Board, Transcript], Act::Find),
     k("/", "", "the same", &[Board, Transcript], Act::Find),
     k("l", "", "read its title and description; j/k scroll, esc closes", &[Mr], Act::Describe),
+    k("h", "hide", "hide it from the board, its whole stack; on a hidden one, bring it back", &[Mr], Act::Hide),
+    k("H", "", "show or hide the MRs you hid, under the board", &[Board], Act::ShowHidden),
     k("i", "ticket", "open the ticket it is for in Linear", &[TicketMr], Act::Ticket),
     k("j", "", "down a line", &[Transcript], Act::Down),
     k("k", "", "up a line", &[Transcript], Act::Up),

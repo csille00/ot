@@ -1,5 +1,6 @@
 ---
 source: src/ui/board.rs
+assertion_line: 1284
 expression: "frame(80, 24, |b, v| { v.bottom(b); v.fold_open = true; v.bottom(b); })"
 ---
  ot  team/app                                                       as of 13:44
@@ -25,4 +26,4 @@ expression: "frame(80, 24, |b, v| { v.bottom(b); v.fold_open = true; v.bottom(b)
   ● ask for review  ·  pipeline passed  ·  nobody asked to review
   +12 −3 in 2 files
  ──────────────────────────────────────────────────────────────────────────────
-  enter open  a reviewers  y link  w web  T tour  m merge  b rebase      ? keys
+  enter open  a reviewers  y link  w web  T tour  h hide  m merge        ? keys

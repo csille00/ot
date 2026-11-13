@@ -106,6 +106,21 @@ pub fn save_stacked(project: &str, was_on: &HashMap<u64, u64>) -> Result<(), Str
     )
 }
 
+/// The MRs you hid from the board; none when they can't be read.
+pub fn hidden(project: &str) -> HashSet<u64> {
+    std::fs::read(dir(project).join("hidden.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_hidden(project: &str, hidden: &HashSet<u64>) -> Result<(), String> {
+    write(
+        &dir(project).join("hidden.json"),
+        &serde_json::to_vec(hidden).map_err(|e| format!("cache: {e}"))?,
+    )
+}
+
 /// Your tickets as Linear last gave them; none when they can't be read.
 pub fn tickets(project: &str) -> Vec<Ticket> {
     std::fs::read(dir(project).join("tickets.json"))

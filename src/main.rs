@@ -266,6 +266,8 @@ struct App {
     landings: Vec<land::Landing>,
     /// Who each MR was stacked on (model::remember), kept between runs.
     was_on: HashMap<u64, u64>,
+    /// The MRs you hid from the board (h), kept across runs.
+    hidden: HashSet<u64>,
     /// What Claude has been asked to read this run, by the heads of the
     /// landing's MRs: once per version of a landing, so one it couldn't
     /// read waits for each deploy until a push or ot's next start.
@@ -337,6 +339,7 @@ impl App {
         let landings = cache::landings(&cfg.project);
         let was_on = model::remember(&cache::stacked(&cfg.project), &snap);
         let tickets = cache::tickets(&cfg.project);
+        let hidden = cache::hidden(&cfg.project);
         let server = nvim::Server::new(writer.clone(), gitlab.clone());
         let mut app = App {
             cfg,
@@ -370,6 +373,7 @@ impl App {
             settling: HashSet::new(),
             landings,
             was_on,
+            hidden,
             asked: HashSet::new(),
             tried: HashSet::new(),
             merges_sent: HashSet::new(),
@@ -408,7 +412,7 @@ impl App {
                 a
             })
             .collect();
-        self.board = model::board(
+        self.board = model::board_hiding(
             &self.snap,
             &self.cfg.rules,
             &self.was_on,
@@ -416,6 +420,7 @@ impl App {
             &agents,
             &self.tickets,
             jiff::Timestamp::now().as_second(),
+            &self.hidden,
         );
         self.view.settle(&self.board);
     }
@@ -1017,6 +1022,32 @@ impl App {
             (None, true) => "asking GitLab…".into(),
             (None, false) => String::new(),
         }
+    }
+
+    /// Hides the picked MR's stack from the board, or brings back a hidden one.
+    fn hide(&mut self) {
+        let Some(iid) = self.picked().map(|m| m.iid) else { return };
+        let all = model::stack_of(&self.snap, &self.was_on, iid);
+        let back = all.iter().all(|i| self.hidden.contains(i));
+        let what = if all.len() > 1 { format!("{} and its stack", model::bang(iid)) } else { model::bang(iid) };
+        if back {
+            all.iter().for_each(|i| {
+                self.hidden.remove(i);
+            });
+            self.note = Some(format!("{what} back on the board"));
+        } else {
+            self.hidden.extend(&all);
+            self.note = Some(format!("{what} hidden; H shows what you hid"));
+        }
+        // What has left GitLab's list is forgotten, so the file stays small.
+        if !self.snap.mrs.is_empty() {
+            let open: HashSet<u64> = self.snap.mrs.iter().map(|m| m.iid).collect();
+            self.hidden.retain(|i| open.contains(i));
+        }
+        if let Err(e) = cache::save_hidden(&self.cfg.project, &self.hidden) {
+            self.note = Some(format!("can't keep what you hid: {e}"));
+        }
+        self.rebuild();
     }
 
     fn picked(&self) -> Option<&model::Mr> {
@@ -2084,6 +2115,14 @@ fn board_act(app: &mut App, act: Act) -> Next {
         Act::Bottom => app.view.bottom(b),
         Act::Unfold => app.view.fold_open = true,
         Act::Fold => app.view.fold_open = false,
+        Act::ShowHidden => {
+            app.view.hidden_open = !app.view.hidden_open;
+            if app.view.hidden_open && app.board.hidden.is_empty() {
+                app.note = Some("nothing hidden; h on an MR hides it".into());
+            }
+            app.view.settle(&app.board);
+        }
+        Act::Hide => app.hide(),
         // On a row whose rebase is ready, or that its landing says is
         // ready to merge, enter asks about that instead.
         Act::Review | Act::Tour => {
