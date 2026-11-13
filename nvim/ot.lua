@@ -466,8 +466,10 @@ local function render()
   -- The text area, whatever gutter your config gives the window, and a
   -- column spare at its right.
   local info = vim.fn.getwininfo(S.list)[1]
-  if info.width - info.textoff - 1 < widest then
-    api.nvim_win_set_width(S.list, widest + info.textoff + 1)
+  -- Grown to fit, but never past 60% of the screen: the code needs the rest.
+  local most = math.floor(vim.o.columns * 0.6)
+  if info.width - info.textoff - 1 < widest and info.width < most then
+    api.nvim_win_set_width(S.list, math.min(widest + info.textoff + 1, most))
     info = vim.fn.getwininfo(S.list)[1]
   end
   local w = info.width - info.textoff - 1

@@ -275,6 +275,9 @@ const MOST_BYTES: usize = 2 << 20;
 /// What changed between two commits and both sides of every changed file,
 /// in three git calls however many files there are.
 pub fn sides(base: &str, head: &str) -> Result<crate::review::Sides, String> {
+    if base.is_empty() || head.is_empty() {
+        return Err("GitLab hasn't said which commits this MR's diff is between yet; refresh and try again".into());
+    }
     let range = format!("{base}..{head}");
     let diff = std::thread::scope(|s| {
         let diff = s.spawn(|| {

@@ -10,6 +10,7 @@ use serde::Deserialize;
 use serde_json::json;
 use std::io::Read;
 use std::process::Command;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -46,6 +47,8 @@ pub struct GitLab {
     host: String,
     /// One cell for every clone, so a token renewed by one thread serves all.
     token: Arc<Mutex<String>>,
+    /// Each MR's base and start, by iid and head, as REST gave them.
+    refs: Arc<Mutex<HashMap<(u64, String), (String, String)>>>,
 }
 
 /// GITLAB_TOKEN, else the token glab keeps for the host.
@@ -80,6 +83,7 @@ impl GitLab {
             agent,
             host: host.to_string(),
             token: Arc::new(Mutex::new(token(host)?)),
+            refs: Arc::default(),
         })
     }
 
@@ -204,6 +208,7 @@ impl GitLab {
             let path = format!("{}?with_merge_status_recheck=true", write::mr_path(project, mr.iid));
             let _ = self.rest(Method::Get, &path, &json!({}));
         }
+        self.fill_refs(project, &mut mrs);
         let default_branch = d
             .project
             .and_then(|p| p.repository)
@@ -223,7 +228,7 @@ impl GitLab {
     /// branch's MR. Unsized until `size`.
     pub fn merged(&self, project: &str, main: &str) -> Result<Vec<Mr>, String> {
         let d: MergedData = self.graphql(&format!("{MERGED}{FRAGMENTS}"), json!({ "path": project }))?;
-        Ok(d.current_user
+        let mut mrs: Vec<Mr> = d.current_user
             .merged
             .nodes
             .into_iter()
@@ -232,7 +237,47 @@ impl GitLab {
                 reach: Some(Reach::Merged),
                 ..n.into_mr()
             })
-            .collect())
+            .collect();
+        self.fill_refs(project, &mut mrs);
+        Ok(mrs)
+    }
+
+    /// The base and start of each MR GraphQL gave none for: its diffRefs is
+    /// null on gitlab.com, though REST's diff_refs has them. Asked once per head.
+    fn fill_refs(&self, project: &str, mrs: &mut [Mr]) {
+        let need: Vec<(u64, String)> = {
+            let known = self.refs.lock().unwrap_or_else(|e| e.into_inner());
+            mrs.iter().filter(|m| m.base.is_empty() && !known.contains_key(&(m.iid, m.head.clone()))).map(|m| (m.iid, m.head.clone())).collect()
+        };
+        let asked: Vec<(u64, String, String, String)> = std::thread::scope(|s| {
+            let chunks: Vec<_> = need
+                .chunks(need.len().div_ceil(8).max(1))
+                .map(|part| {
+                    s.spawn(move || {
+                        part.iter()
+                            .filter_map(|(iid, _)| {
+                                let v = self.rest(Method::Get, &write::mr_path(project, *iid), &serde_json::Value::Null).ok()?;
+                                let r = &v["diff_refs"];
+                                let get = |k: &str| r[k].as_str().unwrap_or_default().to_string();
+                                Some((*iid, get("head_sha"), get("base_sha"), get("start_sha")))
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            chunks.into_iter().flat_map(|c| c.join().unwrap_or_default()).collect()
+        });
+        let mut known = self.refs.lock().unwrap_or_else(|e| e.into_inner());
+        for (iid, head, base, start) in asked {
+            if !base.is_empty() {
+                known.insert((iid, head), (base, start));
+            }
+        }
+        for m in mrs.iter_mut().filter(|m| m.base.is_empty()) {
+            if let Some((base, start)) = known.get(&(m.iid, m.head.clone())) {
+                (m.base, m.start) = (base.clone(), start.clone());
+            }
+        }
     }
 
     /// Fills in each MR's size (adds, dels, files). A diff's size is fixed
@@ -595,7 +640,7 @@ const SIZES: &str = "query($id: ID!, $iids: [String!]) { project(fullPath: $id) 
 
 const FRAGMENTS: &str = "
 fragment mr on MergeRequest { iid title draft webUrl author { username } sourceBranch targetBranch detailedMergeStatus mergeError autoMergeEnabled conflicts updatedAt
-  resolvableDiscussionsCount resolvedDiscussionsCount approved diffRefs { headSha baseSha startSha }
+  resolvableDiscussionsCount resolvedDiscussionsCount approved diffHeadSha diffRefs { headSha baseSha startSha }
   approvedBy { nodes { username } } reviewers { nodes { username } }
   headPipeline { id status jobs(statuses: [FAILED], retried: false, first: 50) { nodes { name allowFailure } } } }";
 
@@ -751,6 +796,7 @@ struct Node {
     resolved_discussions_count: Option<u32>,
     approved: bool,
     diff_refs: Option<DiffRefs>,
+    diff_head_sha: Option<String>,
     merge_commit_sha: Option<String>,
     approved_by: Option<Nodes<Name>>,
     reviewers: Option<Nodes<Name>>,
@@ -858,7 +904,7 @@ impl Node {
             adds: 0,
             dels: 0,
             files: 0,
-            head: refs.head_sha.unwrap_or_default(),
+            head: refs.head_sha.or(self.diff_head_sha).unwrap_or_default(),
             base: refs.base_sha.unwrap_or_default(),
             start: refs.start_sha.unwrap_or_default(),
             pipeline_id,
