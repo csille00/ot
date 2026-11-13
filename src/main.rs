@@ -25,6 +25,7 @@ mod popup;
 mod rebase;
 mod review;
 mod slack;
+mod stats;
 mod t3;
 mod term;
 mod tour;
@@ -130,6 +131,8 @@ enum Msg {
     Asked(String),
     /// The reply's nvim, in its box over ot, drew; or, true, has exited.
     Popup(bool),
+    /// This machine, read again.
+    Stats(stats::Stats),
     /// How a tour read ahead for `iid` at `head` is coming along.
     Toured { iid: u64, head: String, state: boardui::Toured },
     /// Files dropped on the reply were copied from the Mac (how many), or why not.
@@ -274,6 +277,8 @@ struct App {
     hidden: HashSet<u64>,
     /// Tours read ahead (l then T), and ones already kept, by MR.
     tours: HashMap<u64, boardui::Toured>,
+    /// This machine as last read, for the board's htop strip.
+    stats: Option<stats::Stats>,
     /// What Claude has been asked to read this run, by the heads of the
     /// landing's MRs: once per version of a landing, so one it couldn't
     /// read waits for each deploy until a push or ot's next start.
@@ -381,6 +386,7 @@ impl App {
             was_on,
             hidden,
             tours: HashMap::new(),
+            stats: None,
             asked: HashSet::new(),
             tried: HashSet::new(),
             merges_sent: HashSet::new(),
@@ -1322,7 +1328,9 @@ fn run(
     let (lend, lent) = mpsc::channel();
     let tx = app.tx.clone();
     std::thread::spawn(move || input(tx, lent));
-    watch_claude(app.tx.clone());
+    watch_claude(app.tx.clone(), cache::review_tree(&app.cfg.project));
+    let tx = app.tx.clone();
+    stats::watch(move |st| tx.send(Msg::Stats(st)).is_ok());
     let tx = app.tx.clone();
     hc::watch(move |agents| {
         let _ = tx.send(Msg::Hc(agents));
@@ -1384,6 +1392,7 @@ fn run(
                         app.tours.insert(iid, state);
                     }
                 }
+                Msg::Stats(st) => app.stats = Some(st),
                 Msg::Popup(false) => {}
                 Msg::Popup(true) => {
                     if let Some((p, c)) = app.popup.take() {
@@ -2724,6 +2733,7 @@ fn draw(term: &mut ratatui::DefaultTerminal, app: &mut App) -> std::io::Result<(
             playing: app.playing.as_ref(),
             hills: &app.hills,
             tours: &app.tours,
+            stats: app.stats.as_ref(),
         };
         boardui::draw(f, &s, &mut app.view);
         if let Mode::Blurb { iid, text, scroll } = &mut app.view.mode {
@@ -2750,13 +2760,15 @@ fn statuses(agents: &[hc::Agent]) -> HashMap<String, hc::Status> {
 const CLAUDE_EVERY: Duration = Duration::from_secs(2);
 
 /// The thread that watches Claude's sessions on this repo's checkouts and
-/// says when they change.
-fn watch_claude(tx: Sender<Msg>) {
+/// says when they change; not ot's own review checkout, `review`, where its
+/// tour chats run.
+fn watch_claude(tx: Sender<Msg>, review: PathBuf) {
     std::thread::spawn(move || {
         let mut reader = claude::Reader::default();
         let mut last = vec![];
         loop {
-            let found = reader.sessions(&git::worktrees(), jiff::Timestamp::now().as_second());
+            let checkouts: Vec<git::Worktree> = git::worktrees().into_iter().filter(|w| w.path != review).collect();
+            let found = reader.sessions(&checkouts, jiff::Timestamp::now().as_second());
             if found != last {
                 last = found.clone();
                 if tx.send(Msg::Claude(found)).is_err() {

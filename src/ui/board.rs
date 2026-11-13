@@ -287,6 +287,84 @@ pub struct Screen<'a> {
     pub hills: &'a Hills,
     /// The tours read ahead (l then T), by MR.
     pub tours: &'a HashMap<u64, Toured>,
+    /// This machine, as last read; drawn when the board has the room.
+    pub stats: Option<&'a crate::stats::Stats>,
+}
+
+/// Lower than this, the board keeps its rows for MRs, not the machine.
+const STATS_FROM: u16 = 36;
+
+/// Green, then amber past half, red past 85%, as htop's meters go.
+fn level(frac: f64) -> Color {
+    if frac >= 0.85 {
+        RED
+    } else if frac >= 0.5 {
+        AMBER
+    } else {
+        GREEN
+    }
+}
+
+/// An htop meter: its label, the bar `w` wide filled to `frac`, and what it says.
+fn meter(o: &mut Out, label: &str, frac: f64, says: &str, w: usize) {
+    o.put(label, fg(TEAL));
+    o.put("[", fg(FAINT));
+    let inside = w.saturating_sub(2);
+    let full = ((frac.clamp(0.0, 1.0) * inside as f64).round() as usize).min(inside);
+    o.put(&"|".repeat(full), fg(level(frac)));
+    o.put(&" ".repeat(inside - full), Style::new());
+    o.put("]", fg(FAINT));
+    o.put(&format!(" {says}"), fg(TEXT));
+}
+
+/// The machine's lines: uptime and load, the meters, each core, what is busiest.
+fn stats_lines(st: &crate::stats::Stats, right: usize) -> Vec<Line<'static>> {
+    use crate::stats::{size, up};
+    let w = right.saturating_sub(3);
+    let mut out = vec![rule(right)];
+    let mut o = Out::default();
+    o.put("  this machine", fg(DIM).bold());
+    o.put(&format!("   up {}  ·  load {:.2} {:.2} {:.2}  ·  {} cores  ·  {} processes", up(st.uptime), st.load[0], st.load[1], st.load[2], st.cores.len(), st.procs), fg(DIM));
+    out.push(o.line());
+    let mem = if st.mem_total > 0 { st.mem_used as f64 / st.mem_total as f64 } else { 0.0 };
+    let swap = if st.swap_total > 0 { st.swap_used as f64 / st.swap_total as f64 } else { 0.0 };
+    let (cpu_says, mem_says, swap_says) = (format!("{:>3.0}%", st.cpu * 100.0), format!("{}/{}", size(st.mem_used), size(st.mem_total)), format!("{}/{}", size(st.swap_used), size(st.swap_total)));
+    // Three meters in a row, each the room left over its label and words.
+    let words = 4 + 4 + 5 + 3 * 1 + width(&cpu_says) + width(&mem_says) + width(&swap_says) + 2 + 6;
+    let bar = (w.saturating_sub(words) / 3).max(6);
+    let mut o = Out::default();
+    o.put("  ", Style::new());
+    meter(&mut o, "cpu ", st.cpu, &cpu_says, bar);
+    o.put("   ", Style::new());
+    meter(&mut o, "mem ", mem, &mem_says, bar);
+    o.put("   ", Style::new());
+    meter(&mut o, "swp ", swap, &swap_says, bar);
+    out.push(o.line());
+    let mut o = Out::default();
+    o.put("  cores ", fg(TEAL));
+    const BLOCKS: [&str; 8] = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
+    for c in st.cores.iter().take(w.saturating_sub(8)) {
+        let i = ((c.clamp(0.0, 1.0) * 7.0).round() as usize).min(7);
+        o.put(BLOCKS[i], fg(if *c < 0.05 { FAINT } else { level(*c) }));
+    }
+    out.push(o.line());
+    let mut o = Out::default();
+    o.put("  busy  ", fg(TEAL));
+    let mut first = true;
+    for (name, cpu, mem) in &st.top {
+        let item = format!("{name} {:.0}% {}", cpu * 100.0, size(*mem));
+        let sep = if first { "" } else { "  ·  " };
+        if o.w + width(sep) + width(&item) > w {
+            break;
+        }
+        o.put(sep, fg(FAINT));
+        o.put(name, fg(TEXT));
+        o.put(&format!(" {:.0}%", cpu * 100.0), fg(if *cpu >= 1.0 { AMBER } else { DIM }));
+        o.put(&format!(" {}", size(*mem)), fg(DIM));
+        first = false;
+    }
+    out.push(o.line());
+    out
 }
 
 /// A tour read ahead of opening the review.
@@ -352,7 +430,12 @@ pub fn draw(f: &mut Frame, s: &Screen, v: &mut View) {
         (help(), 0..0, vec![])
     } else {
         let (body, cur) = tree(s, v, right);
-        (body, cur, panel_lines(s, v, right))
+        let mut under = match s.stats {
+            Some(st) if area.height >= STATS_FROM => stats_lines(st, right),
+            _ => vec![],
+        };
+        under.extend(panel_lines(s, v, right));
+        (body, cur, under)
     };
     let foot = footer(s, v, right);
     let tune = s.playing.filter(|p| p.playing());
@@ -1229,6 +1312,7 @@ mod tests {
             playing: None,
             hills: &Hills::default(),
             tours: &HashMap::new(),
+            stats: None,
         };
         t.draw(|f| draw(f, &s, &mut v)).unwrap();
         crate::ui::text(&t)
