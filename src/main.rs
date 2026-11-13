@@ -208,6 +208,8 @@ struct App {
     hills: ui::music::Hills,
     /// How wide the last draw was, which the bars are laid out for.
     width: usize,
+    /// Images in conversations, once the terminal has said how it draws them.
+    images: Option<sessionui::Images>,
     /// Seconds of seeking asked for and not sent yet, and when to send
     /// them: one seek, a moment after the last press, since each restarts
     /// the stream.
@@ -297,6 +299,7 @@ impl App {
             playing: None,
             hills: ui::music::Hills::default(),
             width: 80,
+            images: None,
             seek: 0.0,
             seek_due: None,
             sought: None,
@@ -1015,6 +1018,13 @@ fn main() {
     std::thread::spawn(review::rules);
 
     let mut term = ratatui::init();
+    // zellij drops kitty's image escapes, so inside it images are drawn in half blocks.
+    let picker = if std::env::var_os("ZELLIJ").is_some() {
+        ratatui_image::picker::Picker::halfblocks()
+    } else {
+        ratatui_image::picker::Picker::from_query_stdio().unwrap_or_else(|_| ratatui_image::picker::Picker::halfblocks())
+    };
+    app.images = Some(sessionui::Images::new(picker));
     let _ = execute!(std::io::stdout(), EnableFocusChange, EnableBracketedPaste);
     let result = run(&mut term, &mut app, rx);
     let _ = execute!(std::io::stdout(), DisableFocusChange, DisableBracketedPaste);
@@ -1162,6 +1172,9 @@ fn run(
                         Next::Quit => return Ok(()),
                         Next::Review(open) => review_in_nvim(term, &lend, app, open),
                         Next::Attach(agent) if t3::owns(&agent.address) => {
+                            if let Some(i) = app.images.as_mut() {
+                                i.forget();
+                            }
                             app.shown = Shown::Thread { agent, turns: vec![], view: sessionui::View::at_end() };
                             app.load_thread();
                         }
@@ -1511,7 +1524,10 @@ fn board_act(app: &mut App, act: Act) -> Next {
         Act::Music => app.shown = Shown::Music(musicui::View::default()),
         Act::Read => {
             if let Some(Pick::Session(id)) = &app.view.at {
-                app.shown = Shown::Session {
+                if let Some(i) = app.images.as_mut() {
+                    i.forget();
+                }
+app.shown = Shown::Session {
                     id: id.clone(),
                     agent: None,
                     view: sessionui::View::at_end(),
@@ -1539,7 +1555,10 @@ fn board_act(app: &mut App, act: Act) -> Next {
                 _ => None,
             };
             if let Some(w @ model::Worker { session: Some(id), .. }) = agent {
-                app.shown = Shown::Session {
+                if let Some(i) = app.images.as_mut() {
+                    i.forget();
+                }
+app.shown = Shown::Session {
                     id: id.clone(),
                     agent: w.agent.clone(),
                     view: sessionui::View::at_end(),
@@ -1808,8 +1827,9 @@ fn draw(term: &mut ratatui::DefaultTerminal, app: &mut App) -> std::io::Result<(
             None => sessionui::Transcript::session(s, now),
         };
         let note = app.note.as_deref();
+        let images = app.images.as_mut();
         return term.draw(|f| {
-            sessionui::draw(f, &t, now, view, &places, note);
+            sessionui::draw(f, &t, now, view, &places, note, images);
             reply_box(f, tell.as_ref());
         })
         .map(|_| ());
@@ -1823,8 +1843,9 @@ fn draw(term: &mut ratatui::DefaultTerminal, app: &mut App) -> std::io::Result<(
         }
         let t = sessionui::Transcript { title: agent.name.clone(), facts, turns, voices: ["you", "claude"] };
         let note = app.note.as_deref();
+        let images = app.images.as_mut();
         return term.draw(|f| {
-            sessionui::draw(f, &t, now, view, &places, note);
+            sessionui::draw(f, &t, now, view, &places, note, images);
             reply_box(f, tell.as_ref());
         })
         .map(|_| ());

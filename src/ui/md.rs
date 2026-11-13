@@ -226,12 +226,18 @@ pub fn inline(s: &str, base: Style) -> Row {
             i += 1;
             continue;
         }
-        if c == '[' {
-            if let Some(mid) = ahead(i + 1, &[']', '(']) {
+        let image = c == '!' && cs.get(i + 1) == Some(&'[');
+        if c == '[' || image {
+            let open = if image { i + 1 } else { i };
+            if let Some(mid) = ahead(open + 1, &[']', '(']) {
                 if let Some(end) = ahead(mid + 2, &[')']) {
                     flush(&mut out, &mut buf, style(bold, italic));
-                    let text: String = cs[i + 1..mid].iter().collect();
-                    out.push((text, style(bold, italic).fg(TEAL).add_modifier(Modifier::UNDERLINED)));
+                    let text: String = cs[open + 1..mid].iter().collect();
+                    if image {
+                        out.push((format!("▣ {text}"), style(bold, italic).fg(TEAL)));
+                    } else {
+                        out.push((text, style(bold, italic).fg(TEAL).add_modifier(Modifier::UNDERLINED)));
+                    }
                     i = end + 1;
                     continue;
                 }
@@ -346,6 +352,11 @@ mod tests {
     fn emphasis_and_code_lose_their_marks() {
         assert_eq!(text("a **bold** and `code` and *it* [link](https://x.y)", 80), ["a bold and code and it link"]);
         assert_eq!(text("snake_case and 2 * 3 stay", 80), ["snake_case and 2 * 3 stay"]);
+    }
+
+    #[test]
+    fn an_inline_image_reads_as_its_caption() {
+        assert_eq!(text("see ![Part A](/tmp/a.mp4) here", 80), ["see ▣ Part A here"]);
     }
 
     #[test]
