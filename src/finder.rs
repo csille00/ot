@@ -233,6 +233,20 @@ fn said(db: &Connection, id: &str) -> rusqlite::Result<Vec<Said>> {
     Ok(said)
 }
 
+/// The provider and model your newest thread uses, for a new one: T3 starts none without.
+pub fn last_model() -> Option<(String, String)> {
+    let db = connect().ok()?;
+    db.query_row(
+        "SELECT json_extract(payload_json, '$.modelSelection.instanceId'), json_extract(payload_json, '$.modelSelection.model')
+           FROM orchestration_v2_projection_threads
+          WHERE deleted_at IS NULL AND json_extract(payload_json, '$.modelSelection.model') IS NOT NULL
+          ORDER BY created_at DESC LIMIT 1",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .ok()
+}
+
 /// Where the thread works: its own worktree, else its project's folder.
 pub fn cwd(id: &str) -> Option<std::path::PathBuf> {
     let db = connect().ok()?;

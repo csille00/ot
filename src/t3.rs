@@ -50,6 +50,8 @@ pub fn home() -> Option<PathBuf> {
 
 /// Whether `address` is a T3 thread's id rather than an hc address like "t9" or "mini/t1q".
 pub fn owns(address: &str) -> bool {
+    // Threads started through T3's CLI or MCP have their uuid after a "mcp:".
+    let address = address.split_once(':').filter(|(src, _)| src.bytes().all(|b| b.is_ascii_lowercase())).map_or(address, |(_, id)| id);
     address.len() == 36 && address.bytes().enumerate().all(|(i, b)| if [8, 13, 18, 23].contains(&i) { b == b'-' } else { b.is_ascii_hexdigit() })
 }
 
@@ -274,8 +276,13 @@ pub fn rename(address: &str, title: &str) -> Result<(), String> {
 /// Starts a thread in the T3 project this checkout is in, `text` its first message; its id.
 pub fn start(text: &str) -> Result<String, String> {
     let bin = bin().ok_or("no t3 here")?;
+    let mut args = vec!["thread".to_string(), "start".into()];
+    if let Some((provider, model)) = crate::finder::last_model() {
+        args.extend(["--provider".into(), provider, "--model".into(), model]);
+    }
+    args.extend([".".into(), "-".into()]);
     let mut child = Command::new(bin)
-        .args(["thread", "start", ".", "-"])
+        .args(&args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -437,6 +444,8 @@ mod tests {
         assert!(owns("bba1a549-60f8-4425-bb4e-569c328a3cc4"));
         assert!(!owns("t9"));
         assert!(!owns("mini/t1q"));
+        assert!(owns("mcp:40d81c83-6935-4c94-b279-7224c4c7be17"), "a thread started through T3's CLI");
+        assert!(!owns("mini/t1q:40d81c83-6935-4c94-b279-7224c4c7be17"));
         assert!(!owns("bba1a549x60f8-4425-bb4e-569c328a3cc4"));
     }
 }
