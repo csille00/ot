@@ -22,8 +22,20 @@ pub struct Images {
     made: HashMap<(String, u16, u16), Option<Protocol>>,
 }
 
+/// One line to ~/.cache/ot/images.log, for when images don't show.
+pub fn log(line: &str) {
+    use std::io::Write as _;
+    let Some(home) = std::env::var_os("HOME") else { return };
+    let path = Path::new(&home).join(".cache/ot/images.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(f, "{} {line}", jiff::Timestamp::now());
+    }
+}
+
 impl Images {
     pub fn new(picker: Picker) -> Images {
+        let f = picker.font_size();
+        log(&format!("picker {:?} font {}x{} TERM={:?} ZELLIJ={:?} SSH={:?}", picker.protocol_type(), f.width, f.height, std::env::var("TERM").ok(), std::env::var("ZELLIJ").ok(), std::env::var_os("SSH_TTY").is_some()));
         Images { picker, made: HashMap::new() }
     }
 
@@ -42,8 +54,13 @@ impl Images {
         self.made
             .entry((p.path.clone(), p.w, p.h))
             .or_insert_with(|| {
-                let img = image::ImageReader::open(&p.path).ok()?.with_guessed_format().ok()?.decode().ok()?;
-                picker.new_protocol(img, Size::new(p.w, p.h), Resize::Fit(None)).ok()
+                let made = image::ImageReader::open(&p.path)
+                    .map_err(|e| e.to_string())
+                    .and_then(|r| r.with_guessed_format().map_err(|e| e.to_string()))
+                    .and_then(|r| r.decode().map_err(|e| e.to_string()))
+                    .and_then(|img| picker.new_protocol(img, Size::new(p.w, p.h), Resize::Fit(None)).map_err(|e| e.to_string()));
+                log(&format!("made {} {}x{}: {}", p.path, p.w, p.h, made.as_ref().map_or_else(|e| format!("failed: {e}"), |_| "ok".into())));
+                made.ok()
             })
             .as_ref()
     }

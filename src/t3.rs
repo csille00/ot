@@ -261,9 +261,130 @@ pub fn conversation(address: &str) -> Result<Vec<crate::claude::Turn>, String> {
     Ok(turns)
 }
 
-/// T3's CLI has no stop yet.
-pub fn interrupt(_address: &str) -> Result<bool, String> {
-    Err("T3's CLI can't stop a thread yet: stop it in T3".into())
+/// Stops the thread's running turn, as T3's Stop button does.
+pub fn interrupt(address: &str) -> Result<bool, String> {
+    dispatch(serde_json::json!({ "type": "thread.stop", "threadId": address })).map(|_| true)
+}
+
+/// Settles the thread, which takes it off the board.
+pub fn settle(address: &str) -> Result<(), String> {
+    dispatch(serde_json::json!({ "type": "thread.settle", "threadId": address })).map(|_| ())
+}
+
+/// One orchestration command through T3's WebSocket, as its own apps send them; T3's
+/// CLI has no settle or stop yet. The command gets a fresh id; the server's answer back.
+fn dispatch(mut command: Value) -> Result<Value, String> {
+    command["commandId"] = Value::String(uuid4());
+    let origin = server_origin()?;
+    let ticket = match ws_ticket(&origin, &token(false)?) {
+        Err(e) if e == "401" => ws_ticket(&origin, &token(true)?)?,
+        t => t?,
+    };
+    let url = format!("{}/ws?wsTicket={ticket}&orchestrationProtocol=2", origin.replacen("http", "ws", 1));
+    let (mut ws, _) = tungstenite::connect(url.as_str()).map_err(|e| format!("T3's socket: {e}"))?;
+    let request = serde_json::json!({ "_tag": "Request", "id": "1", "tag": "orchestration.dispatchCommand", "payload": command, "headers": [] });
+    ws.send(tungstenite::Message::text(request.to_string())).map_err(|e| format!("T3's socket: {e}"))?;
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline {
+        let msg = ws.read().map_err(|e| format!("T3's socket: {e}"))?;
+        let Ok(text) = msg.to_text() else { continue };
+        for frame in text.lines().filter(|l| !l.trim().is_empty()) {
+            let Ok(v) = serde_json::from_str::<Value>(frame) else { continue };
+            match v["_tag"].as_str() {
+                Some("Ping") => {
+                    let _ = ws.send(tungstenite::Message::text(r#"{"_tag":"Pong"}"#));
+                }
+                Some("Exit") if v["requestId"] == "1" => {
+                    let _ = ws.close(None);
+                    return match v["exit"]["_tag"].as_str() {
+                        Some("Success") => Ok(v["exit"]["value"].clone()),
+                        _ => Err(failure(&v["exit"]["cause"])),
+                    };
+                }
+                Some("Defect" | "ClientProtocolError") => return Err(format!("T3 refused: {}", v)),
+                _ => {}
+            }
+        }
+    }
+    Err("T3 didn't answer in 15s".into())
+}
+
+/// The words in an RPC failure's cause, however deep T3 put them.
+fn failure(cause: &Value) -> String {
+    fn find(v: &Value) -> Option<String> {
+        if let Some(m) = v.get("message").and_then(Value::as_str) {
+            return Some(m.to_string());
+        }
+        match v {
+            Value::Object(o) => o.values().find_map(find),
+            Value::Array(a) => a.iter().find_map(find),
+            _ => None,
+        }
+    }
+    find(cause).unwrap_or_else(|| format!("T3 refused: {cause}"))
+}
+
+/// Where the running T3 server answers, from its runtime state.
+fn server_origin() -> Result<String, String> {
+    let path = home().ok_or("no T3 home")?.join("userdata/server-runtime.json");
+    let v: Value = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).ok_or("T3's server isn't running")?;
+    v["origin"].as_str().map(String::from).ok_or_else(|| "T3's server didn't say where it is".into())
+}
+
+/// A short-lived ticket for T3's socket, or "401" when the token is no good.
+fn ws_ticket(origin: &str, token: &str) -> Result<String, String> {
+    let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(10))).http_status_as_error(false).build().into();
+    let mut resp = agent
+        .post(&format!("{origin}/api/auth/websocket-ticket"))
+        .header("Authorization", &format!("Bearer {token}"))
+        .send_empty()
+        .map_err(|e| format!("T3: {e}"))?;
+    if resp.status() == 401 {
+        return Err("401".into());
+    }
+    let v: Value = resp.body_mut().read_json().map_err(|e| format!("T3's ticket ({}): {e}", resp.status()))?;
+    v["ticket"].as_str().map(String::from).ok_or_else(|| format!("T3 gave no ticket: {v}"))
+}
+
+/// ot's own T3 session token, kept in ~/.cache/ot/t3-token (yours alone) for its 30
+/// days; a new one when `again` or none is kept.
+fn token(again: bool) -> Result<String, String> {
+    let path = PathBuf::from(std::env::var_os("HOME").ok_or("no HOME")?).join(".cache/ot/t3-token");
+    if !again {
+        if let Ok(t) = std::fs::read_to_string(&path) {
+            if !t.trim().is_empty() {
+                return Ok(t.trim().to_string());
+            }
+        }
+    }
+    let bin = bin().ok_or("no t3 here")?;
+    let out = Command::new(bin)
+        .args(["auth", "session", "issue", "--scope", "orchestration:read", "--scope", "orchestration:operate", "--ttl", "30d", "--label", "ot", "--json"])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("t3: {e}"))?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let v: Value = text.find('{').and_then(|i| serde_json::from_str(&text[i..]).ok()).ok_or_else(|| last_line(&out.stderr))?;
+    let t = v["token"].as_str().ok_or("t3 issued no token")?.to_string();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&path).map_err(|e| e.to_string())?;
+    f.write_all(t.as_bytes()).map_err(|e| e.to_string())?;
+    Ok(t)
+}
+
+/// A random version 4 UUID, from the kernel's random source.
+fn uuid4() -> String {
+    let mut b = [0u8; 16];
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        let _ = std::io::Read::read_exact(&mut f, &mut b);
+    }
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    let h: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    format!("{}-{}-{}-{}-{}", &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32])
 }
 
 /// What `t3 <args>` prints as JSON, or its reason it couldn't.
@@ -293,3 +414,4 @@ mod tests {
         assert!(!owns("bba1a549x60f8-4425-bb4e-569c328a3cc4"));
     }
 }
+

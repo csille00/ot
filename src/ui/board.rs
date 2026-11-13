@@ -190,13 +190,15 @@ impl View {
                 places.extend(readable(agent));
             }
             Some(Item::Ticket { agent, .. }) => places.extend(readable(agent)),
-            Some(Item::Hc { status, .. }) => {
+            Some(Item::Hc { status, address, .. }) => {
                 places.push(Place::HcAlone);
                 places.extend((*status == Status::Working).then_some(Place::HcWorking));
+                places.extend(crate::t3::owns(address).then_some(Place::T3));
             }
-            Some(Item::Claude { terminal: Some(_), state, .. }) => {
+            Some(Item::Claude { terminal: Some(t), state, .. }) => {
                 places.extend([Place::Hc, Place::HcSession]);
                 places.extend((*state == State::Busy).then_some(Place::HcWorking));
+                places.extend(crate::t3::owns(t).then_some(Place::T3));
             }
             _ => {}
         }

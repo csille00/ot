@@ -408,7 +408,7 @@ impl App {
                 _ => Some(("music", vec![keys::Place::Music])),
             },
             Shown::Session { .. } | Shown::Thread { .. } => {
-                if matches!(self.view.mode, Mode::Tell { .. }) {
+                if !matches!(self.view.mode, Mode::Board) {
                     return None;
                 }
                 let mut at = vec![keys::Place::Transcript];
@@ -1018,13 +1018,11 @@ fn main() {
     std::thread::spawn(review::rules);
 
     let mut term = ratatui::init();
-    // zellij drops kitty's image escapes, so inside it images are drawn in half blocks.
-    let picker = if std::env::var_os("ZELLIJ").is_some() {
-        ratatui_image::picker::Picker::halfblocks()
-    } else {
-        ratatui_image::picker::Picker::from_query_stdio().unwrap_or_else(|_| ratatui_image::picker::Picker::halfblocks())
-    };
-    app.images = Some(sessionui::Images::new(picker));
+    app.images = image_picker().map(sessionui::Images::new);
+    // A late answer to the terminal query would read as keys; drop what is waiting.
+    while event::poll(Duration::from_millis(150)).unwrap_or(false) {
+        let _ = event::read();
+    }
     let _ = execute!(std::io::stdout(), EnableFocusChange, EnableBracketedPaste);
     let result = run(&mut term, &mut app, rx);
     let _ = execute!(std::io::stdout(), DisableFocusChange, DisableBracketedPaste);
@@ -1333,6 +1331,19 @@ fn session_act(app: &mut App, act: Act) {
             }
             return;
         }
+        Act::Stop => {
+            if let Some(to) = app.reply_to() {
+                app.view.mode = Mode::Stop(to);
+            }
+            return;
+        }
+        Act::Settle => {
+            if let Some(a) = app.reply_to() {
+                settle(app, a);
+                app.shown = Shown::Board;
+            }
+            return;
+        }
         _ => {}
     }
     let (Shown::Session { view, .. } | Shown::Thread { view, .. }) = &mut app.shown else { return };
@@ -1549,6 +1560,11 @@ app.shown = Shown::Session {
                 app.view.mode = Mode::Stop(a.clone());
             }
         }
+        Act::Settle => {
+            if let Some(a) = app.picked_agent().filter(|a| t3::owns(&a.address)).cloned() {
+                settle(app, a);
+            }
+        }
         Act::Agent => {
             let agent = match app.view.item(&app.board) {
                 Some(model::Item::Mr { agent, .. } | model::Item::Ticket { agent, .. }) => agent.as_ref(),
@@ -1735,6 +1751,24 @@ fn volume(by: i32) {
     );
 }
 
+/// How conversations draw images: OT_IMAGES=kitty|halfblocks|off says, else the
+/// terminal's answer. zellij drops kitty's escapes, so inside it, half blocks.
+fn image_picker() -> Option<ratatui_image::picker::Picker> {
+    use ratatui_image::picker::{Picker, ProtocolType};
+    let asked = || Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
+    match std::env::var("OT_IMAGES").as_deref() {
+        Ok("off") => None,
+        Ok("halfblocks") => Some(Picker::halfblocks()),
+        Ok("kitty") => {
+            let mut p = asked();
+            p.set_protocol_type(ProtocolType::Kitty);
+            Some(p)
+        }
+        _ if std::env::var_os("ZELLIJ").is_some() => Some(Picker::halfblocks()),
+        _ => Some(asked()),
+    }
+}
+
 /// The places the screen's keys come from, or what the reply box leaves showing.
 fn places_now(places: &Option<(&'static str, Vec<keys::Place>)>) -> Vec<keys::Place> {
     places.as_ref().map_or(vec![keys::Place::Transcript], |(_, p)| p.clone())
@@ -1749,15 +1783,44 @@ fn hc_word(s: hc::Status) -> &'static str {
     }
 }
 
-/// The box a reply is typed in, over a conversation being read.
-fn reply_box(f: &mut ratatui::Frame, tell: Option<&(String, String)>) {
-    let Some((name, text)) = tell else { return };
-    ui::ask(f, |w| {
-        let mut lines = vec![ratatui::text::Line::styled(format!("reply to {name}:"), ui::fg(ui::DIM))];
-        lines.extend(ui::typed(text, w));
-        lines.push(ratatui::text::Line::default());
-        lines.push(ui::keys(&[("enter", " sends  "), ("esc", " drops")]));
-        lines
+/// What a conversation being read asks in a box over it.
+enum Asking {
+    Reply(String, String),
+    Stop(String),
+}
+
+/// The box a reply is typed in, or a stop is confirmed, over a conversation.
+fn reply_box(f: &mut ratatui::Frame, asking: Option<&Asking>) {
+    use ratatui::text::Line;
+    match asking {
+        None => {}
+        Some(Asking::Reply(name, text)) => ui::ask(f, |w| {
+            let mut lines = vec![Line::styled(format!("reply to {name}:"), ui::fg(ui::DIM))];
+            lines.extend(ui::typed(text, w));
+            lines.push(Line::default());
+            lines.push(ui::keys(&[("enter", " sends  "), ("esc", " drops")]));
+            lines
+        }),
+        Some(Asking::Stop(name)) => ui::ask(f, |_| {
+            vec![
+                Line::styled(format!("stop {name}? its running turn ends, as T3's Stop does"), ui::fg(ui::AMBER)),
+                Line::default(),
+                ui::keys(&[("y", " yes  "), ("n", " no")]),
+            ]
+        }),
+    }
+}
+
+/// Settles a T3 thread off the UI thread; the note says how it went.
+fn settle(app: &mut App, a: hc::Agent) {
+    app.note = Some(format!("settling {}…", a.name));
+    let tx = app.tx.clone();
+    std::thread::spawn(move || {
+        let how = match t3::settle(&a.address) {
+            Ok(()) => format!("settled {}", a.name),
+            Err(e) => format!("{} not settled: {e}", a.name),
+        };
+        tx.send(Msg::Asked(how))
     });
 }
 
@@ -1813,7 +1876,8 @@ fn draw(term: &mut ratatui::DefaultTerminal, app: &mut App) -> std::io::Result<(
             .map(|_| ());
     }
     let tell = match &app.view.mode {
-        Mode::Tell { to, text } => Some((to.name.clone(), text.clone())),
+        Mode::Tell { to, text } => Some(Asking::Reply(to.name.clone(), text.clone())),
+        Mode::Stop(to) => Some(Asking::Stop(to.name.clone())),
         _ => None,
     };
     let places = places_now(&app.places());
