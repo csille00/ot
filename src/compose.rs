@@ -91,6 +91,70 @@ pub fn nvim_args(c: &Compose) -> Vec<String> {
     ]
 }
 
+/// The Mac's files a drop on Ghostty names, when that is all `text` is: their
+/// paths, as Ghostty writes them (backslashes before spaces and the like).
+pub fn dropped(text: &str) -> Option<Vec<String>> {
+    let mut paths = vec![];
+    let mut cur = String::new();
+    let mut chars = text.trim().chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => cur.extend(chars.next()),
+            c if c.is_whitespace() => {
+                if !cur.is_empty() {
+                    paths.push(std::mem::take(&mut cur));
+                }
+            }
+            c => cur.push(c),
+        }
+    }
+    if !cur.is_empty() {
+        paths.push(cur);
+    }
+    let mac = |p: &String| ["/Users/", "/var/folders/", "/private/", "/Volumes/"].iter().any(|r| p.starts_with(r)) && !Path::new(p).exists();
+    (!paths.is_empty() && paths.iter().all(mac)).then_some(paths)
+}
+
+/// Where ssh reaches the Mac: OT_MAC, else the address this ssh session came from,
+/// as the same user unless OT_MAC_USER says.
+pub fn mac() -> Option<String> {
+    if let Some(m) = std::env::var("OT_MAC").ok().filter(|m| !m.is_empty()) {
+        return Some(m);
+    }
+    let from = std::env::var("SSH_CLIENT").ok()?.split_whitespace().next()?.to_string();
+    let user = std::env::var("OT_MAC_USER").or_else(|_| std::env::var("USER")).ok()?;
+    Some(format!("{user}@{from}"))
+}
+
+/// Copies `path` from the Mac into the paste folder, where the open draft
+/// attaches it; the copy's path.
+pub fn fetch(mac: &str, path: &str) -> Result<PathBuf, String> {
+    let base = Path::new(path).file_name().and_then(|n| n.to_str()).unwrap_or("dropped");
+    let name: String = base.chars().map(|c| if c.is_whitespace() || c == '(' || c == ')' { '-' } else { c }).collect();
+    let dir = paste_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let mut to = dir.join(&name);
+    if to.exists() {
+        to = dir.join(format!("{}-{name}", jiff::Timestamp::now().as_second()));
+    }
+    let part = dir.join(format!(".{}", to.file_name().and_then(|n| n.to_str()).unwrap_or("part")));
+    let file = std::fs::File::create(&part).map_err(|e| e.to_string())?;
+    let quoted = format!("'{}'", path.replace('\'', "'\\''"));
+    let out = std::process::Command::new("ssh")
+        .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", mac, "cat", "--", &quoted])
+        .stdout(file)
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .map_err(|e| format!("ssh: {e}"))?;
+    if !out.status.success() {
+        let _ = std::fs::remove_file(&part);
+        let why = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return Err(if why.is_empty() { format!("ssh to {mac} failed") } else { why });
+    }
+    std::fs::rename(&part, &to).map_err(|e| e.to_string())?;
+    Ok(to)
+}
+
 /// What :w sent, as text and the images it names; None when nvim was left without it.
 pub fn written(c: &Compose) -> Option<(String, Vec<PathBuf>)> {
     if !c.sent.exists() {
@@ -150,6 +214,16 @@ pub fn mime(p: &Path) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_drop_of_the_macs_files_is_read_as_their_paths() {
+        assert_eq!(
+            dropped("/Users/connor/Desktop/Screenshot\\ 2026-11-13\\ at\\ 9.41.png /Users/connor/notes.pdf "),
+            Some(vec!["/Users/connor/Desktop/Screenshot 2026-11-13 at 9.41.png".into(), "/Users/connor/notes.pdf".into()])
+        );
+        assert_eq!(dropped("look at /Users/connor/x.png"), None, "text that is more than paths pastes as text");
+        assert_eq!(dropped("/home/connor/ot/Cargo.toml"), None);
+    }
 
     #[test]
     fn images_that_are_files_here_come_out_of_the_text() {

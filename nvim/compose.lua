@@ -61,7 +61,10 @@ watch:start(meta.paste, {}, vim.schedule_wrap(function(_, name)
   local row = api.nvim_win_get_cursor(win)[1]
   local here = api.nvim_buf_get_lines(draft, row - 1, row, false)[1] or ""
   local from = vim.trim(here) == "" and row - 1 or row
-  api.nvim_buf_set_lines(draft, from, row, false, { ("![%s](%s)"):format(name, path) })
+  -- An image is attached; another file goes in by its path, for the agent to read.
+  local ext = (name:match("%.(%w+)$") or ""):lower()
+  local image = ({ png = 1, jpg = 1, jpeg = 1, gif = 1, webp = 1 })[ext]
+  api.nvim_buf_set_lines(draft, from, row, false, { image and ("![%s](%s)"):format(name, path) or path })
   vim.notify("attached " .. name)
 end))
 

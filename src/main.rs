@@ -130,6 +130,8 @@ enum Msg {
     Asked(String),
     /// The reply's nvim, in its box over ot, drew; or, true, has exited.
     Popup(bool),
+    /// Files dropped on the reply were copied from the Mac (how many), or why not.
+    Dropped { text: String, got: Result<usize, String> },
     /// A T3 thread started with `text`, its id, or why it wasn't.
     Started {
         text: String,
@@ -1334,11 +1336,30 @@ fn run(
                         }
                     }
                 }
-                Msg::Term(Event::Paste(text)) if app.popup.is_some() => {
-                    if let Some((p, _)) = app.popup.as_mut() {
-                        p.paste(&text);
+                Msg::Term(Event::Paste(text)) if app.popup.is_some() => match (compose::dropped(&text), compose::mac()) {
+                    (Some(paths), Some(mac)) => {
+                        app.note = Some(format!("copying {} from the Mac…", if paths.len() == 1 { "a file".to_string() } else { format!("{} files", paths.len()) }));
+                        let tx = app.tx.clone();
+                        std::thread::spawn(move || {
+                            let got: Result<Vec<_>, _> = paths.iter().map(|p| compose::fetch(&mac, p)).collect();
+                            let _ = tx.send(Msg::Dropped { text, got: got.map(|g| g.len()) });
+                        });
                     }
-                }
+                    _ => {
+                        if let Some((p, _)) = app.popup.as_mut() {
+                            p.paste(&text);
+                        }
+                    }
+                },
+                Msg::Dropped { text, got } => match got {
+                    Ok(n) => app.note = Some(format!("{n} file{} from the Mac attached", if n == 1 { "" } else { "s" })),
+                    Err(e) => {
+                        app.note = Some(format!("can't copy that from the Mac ({e}); its path went in instead"));
+                        if let Some((p, _)) = app.popup.as_mut() {
+                            p.paste(&text);
+                        }
+                    }
+                },
                 Msg::Started { text, result } => match result {
                     Ok(id) => {
                         app.note = None;
