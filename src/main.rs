@@ -40,7 +40,7 @@ use ratatui::crossterm::terminal::{enable_raw_mode, EnterAlternateScreen};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
@@ -188,6 +188,8 @@ enum Next {
     Review(nvim::Open),
     /// The terminal to one of hc's agents, until you detach.
     Attach(hc::Agent),
+    /// The terminal to a shell in this folder, until it exits.
+    Shell(PathBuf),
 }
 
 /// A pick cliamp is loading, until it answers for that url.
@@ -1319,6 +1321,13 @@ fn run(
                         Next::Quit => return Ok(()),
                         Next::Review(open) => review_in_nvim(term, &lend, app, open),
                         Next::Attach(agent) if t3::owns(&agent.address) => app.open_thread(agent),
+                        Next::Shell(dir) => {
+                            let mut sh = Command::new(std::env::var_os("SHELL").unwrap_or_else(|| "bash".into()));
+                            sh.current_dir(&dir);
+                            if let Err(e) = lend_terminal(term, &lend, sh) {
+                                app.note = Some(e);
+                            }
+                        }
                         Next::Attach(agent) => match lend_terminal(term, &lend, hc::attach(&agent.address)) {
                             Ok(left) if left.success() => {}
                             Ok(_) => app.note = Some(format!("hc couldn't attach to {}", agent.name)),
@@ -1377,6 +1386,7 @@ fn key(app: &mut App, name: &str) -> Next {
     };
     match &app.shown {
         Shown::Music(_) => music_act(app, act),
+        Shown::Session { .. } | Shown::Thread { .. } if act == Act::Terminal => return terminal(app),
         Shown::Session { .. } | Shown::Thread { .. } if act == Act::Review && app.side.cursor.is_none() => {
             if let Some(mr) = app.thread_mr().cloned() {
                 return app.review(&mr, false);
@@ -1385,6 +1395,30 @@ fn key(app: &mut App, name: &str) -> Next {
         Shown::Session { .. } | Shown::Thread { .. } => session_act(app, act),
         Shown::Board => return board_act(app, act),
     }
+    Next::Stay
+}
+
+/// A shell where the session or thread being read works: a zellij pane beside ot
+/// inside zellij, else this terminal until the shell exits.
+fn terminal(app: &mut App) -> Next {
+    let dir = match &app.shown {
+        Shown::Session { id, .. } => app.sessions.iter().find(|s| s.id == *id).map(|s| s.cwd.clone()),
+        Shown::Thread { agent, .. } => finder::cwd(&agent.address),
+        _ => None,
+    };
+    let Some(dir) = dir.or_else(|| std::env::current_dir().ok()) else {
+        app.note = Some("no folder to open a shell in".into());
+        return Next::Stay;
+    };
+    if std::env::var_os("ZELLIJ").is_none() {
+        return Next::Shell(dir);
+    }
+    let ran = Command::new("zellij").arg("action").arg("new-pane").arg("--cwd").arg(&dir).stdout(Stdio::null()).stderr(Stdio::piped()).output();
+    app.note = Some(match ran {
+        Ok(o) if o.status.success() => format!("a shell in {}, in a new zellij pane", dir.display()),
+        Ok(o) => format!("zellij opened no pane: {}", String::from_utf8_lossy(&o.stderr).trim()),
+        Err(e) => format!("zellij: {e}"),
+    });
     Next::Stay
 }
 

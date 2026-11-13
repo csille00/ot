@@ -37,6 +37,8 @@ pub enum Act {
     Stop,
     /// Settle a T3 thread.
     Settle,
+    /// A shell where the session or thread being read works.
+    Terminal,
     /// Rename one, or start a new one.
     Rename,
     NewThread,
@@ -276,6 +278,7 @@ pub const KEYS: &[Key] = &[
     k("w", "T3", "open the thread in T3, or copy its link over ssh", &[Reply], Act::Web),
     k("x", "stop", "stop the thread's running turn, once you say y", &[Reply], Act::Stop),
     k("q", "back", "back to the board", &[Transcript], Act::Leave),
+    k("t", "terminal", "a shell where it works: a new zellij pane, or this terminal until you exit", &[Transcript], Act::Terminal),
     k("tab", "threads", "into the thread list beside it, to switch threads", &[Transcript], Act::Threads),
     k("]", "", "the next thread in the list", &[Transcript], Act::NextThread),
     k("[", "", "the thread before in the list", &[Transcript], Act::PrevThread),

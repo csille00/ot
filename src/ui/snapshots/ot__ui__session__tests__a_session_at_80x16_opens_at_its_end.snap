@@ -18,4 +18,4 @@ expression: "frame(80, 16, |_| {})"
 
   claude   The errors module is done; the tests pass. Want the happy path  25m
            next?
-  G end  q back  tab threads
+  G end  q back  t terminal  tab threads

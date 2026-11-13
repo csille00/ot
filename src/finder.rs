@@ -233,6 +233,22 @@ fn said(db: &Connection, id: &str) -> rusqlite::Result<Vec<Said>> {
     Ok(said)
 }
 
+/// Where the thread works: its own worktree, else its project's folder.
+pub fn cwd(id: &str) -> Option<std::path::PathBuf> {
+    let db = connect().ok()?;
+    let (tree, root): (Option<String>, Option<String>) = db
+        .query_row(
+            "SELECT json_extract(t.payload_json, '$.worktreePath'), p.workspace_root
+               FROM orchestration_v2_projection_threads t
+               LEFT JOIN projection_projects p ON p.project_id = t.project_id
+              WHERE t.thread_id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .ok()?;
+    tree.filter(|t| !t.is_empty()).or(root).map(std::path::PathBuf::from).filter(|p| p.is_dir())
+}
+
 /// The last thing said in each of `ids`, by you or not, read straight from T3's database.
 pub fn latest(ids: &[&str]) -> HashMap<String, (bool, String)> {
     let Ok(db) = connect() else { return HashMap::new() };
