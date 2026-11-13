@@ -121,6 +121,11 @@ enum Msg {
     },
     /// How something asked of one of hc's agents went, for the note.
     Asked(String),
+    /// A T3 thread started with `text`, its id, or why it wasn't.
+    Started {
+        text: String,
+        result: Result<String, String>,
+    },
     /// An MR's diff at `head`, for the panel beside its thread, or why not.
     Patch {
         iid: u64,
@@ -1230,6 +1235,15 @@ fn run(
                     app.agents = agents;
                     app.rebuild();
                 }
+                Msg::Started { text, result } => match result {
+                    Ok(id) => {
+                        app.note = None;
+                        let name = text.lines().next().unwrap_or_default().chars().take(60).collect();
+                        let now = jiff::Timestamp::now().as_second();
+                        app.open_thread(hc::Agent { address: id, name, status: hc::Status::Working, said: String::new(), at: now, pid: None, branch: String::new() });
+                    }
+                    Err(e) => app.note = Some(format!("no thread started: {e}")),
+                },
                 Msg::Patch { iid, head, result } => {
                     app.patches.insert(iid, (head, result));
                 }
@@ -1405,7 +1419,8 @@ fn pasted(app: &mut App, text: &str) {
             musicui::Search::Typing(typed) => typed,
             _ => return,
         },
-        (Shown::Board, Mode::Tell { text, .. } | Mode::Note { text, .. } | Mode::Message(_, text)) => text,
+        (_, Mode::Tell { text, .. } | Mode::Rename { text, .. } | Mode::NewThread(text)) => text,
+        (Shown::Board, Mode::Note { text, .. } | Mode::Message(_, text)) => text,
         (Shown::Board, Mode::Typing(t)) => {
             t.cycling = None;
             &mut t.text
@@ -1495,6 +1510,11 @@ fn side_act(app: &mut App, act: Act) {
             }
         }
         Act::Threads => app.side.cursor = None,
+        Act::Rename => {
+            if let Some(a) = threads.get(at) {
+                app.view.mode = Mode::Rename { text: a.name.clone(), to: a.clone() };
+            }
+        }
         Act::Leave => {
             app.side.cursor = None;
             app.shown = Shown::Board;
@@ -1574,6 +1594,16 @@ fn session_act(app: &mut App, act: Act) {
         }
         Act::Find => {
             app.open_finder();
+            return;
+        }
+        Act::Rename => {
+            if let Some(a) = app.reply_to() {
+                app.view.mode = Mode::Rename { text: a.name.clone(), to: a };
+            }
+            return;
+        }
+        Act::NewThread => {
+            app.view.mode = Mode::NewThread(String::new());
             return;
         }
         _ => {}
@@ -1714,6 +1744,50 @@ fn answer(app: &mut App, name: &str) {
                 }
             }
         }
+        Mode::Rename { to, mut text } => {
+            match name {
+                "esc" => {}
+                "enter" if text.trim().is_empty() => app.view.mode = Mode::Rename { to, text },
+                "enter" => {
+                    let title = text.trim().to_string();
+                    app.note = Some(format!("renaming {}…", to.name));
+                    let (tx, address) = (app.tx.clone(), to.address.clone());
+                    std::thread::spawn(move || {
+                        let how = match t3::rename(&to.address, &title) {
+                            Ok(()) => format!("renamed {title}"),
+                            Err(e) => format!("{} not renamed: {e}", to.name),
+                        };
+                        let _ = tx.send(Msg::Asked(how));
+                    });
+                    if let Shown::Thread { agent, .. } = &mut app.shown {
+                        if agent.address == address {
+                            agent.name = text.trim().to_string();
+                        }
+                    }
+                }
+                _ => {
+                    keys::edit(&mut text, name);
+                    app.view.mode = Mode::Rename { to, text };
+                }
+            }
+        }
+        Mode::NewThread(mut text) => {
+            match name {
+                "esc" => {}
+                "enter" if text.trim().is_empty() => app.view.mode = Mode::NewThread(text),
+                "enter" => {
+                    app.note = Some("starting a T3 thread…".into());
+                    let tx = app.tx.clone();
+                    std::thread::spawn(move || {
+                        let _ = tx.send(Msg::Started { text: text.clone(), result: t3::start(&text) });
+                    });
+                }
+                _ => {
+                    keys::edit(&mut text, name);
+                    app.view.mode = Mode::NewThread(text);
+                }
+            }
+        }
         Mode::Stop(to) => {
             match name {
                 "y" => {
@@ -1789,6 +1863,12 @@ app.shown = Shown::Session {
                 settle(app, a);
             }
         }
+        Act::Rename => {
+            if let Some(a) = app.picked_agent().filter(|a| t3::owns(&a.address)).cloned() {
+                app.view.mode = Mode::Rename { text: a.name.clone(), to: a };
+            }
+        }
+        Act::NewThread => app.view.mode = Mode::NewThread(String::new()),
         Act::Agent => {
             let agent = match app.view.item(&app.board) {
                 Some(model::Item::Mr { agent, .. } | model::Item::Ticket { agent, .. }) => agent.as_ref(),
@@ -2011,6 +2091,8 @@ fn hc_word(s: hc::Status) -> &'static str {
 enum Asking {
     Reply(String, String),
     Stop(String),
+    Rename(String, String),
+    New(String),
 }
 
 /// The box a reply is typed in, or a stop is confirmed, over a conversation.
@@ -2023,6 +2105,20 @@ fn reply_box(f: &mut ratatui::Frame, asking: Option<&Asking>) {
             lines.extend(ui::typed(text, w));
             lines.push(Line::default());
             lines.push(ui::keys(&[("enter", " sends  "), ("esc", " drops")]));
+            lines
+        }),
+        Some(Asking::Rename(name, text)) => ui::ask(f, |w| {
+            let mut lines = vec![Line::styled(format!("rename {name}:"), ui::fg(ui::DIM))];
+            lines.extend(ui::typed(text, w));
+            lines.push(Line::default());
+            lines.push(ui::keys(&[("enter", " renames  "), ("esc", " drops")]));
+            lines
+        }),
+        Some(Asking::New(text)) => ui::ask(f, |w| {
+            let mut lines = vec![Line::styled("a new T3 thread, in this checkout's project. what should it do?", ui::fg(ui::DIM))];
+            lines.extend(ui::typed(text, w));
+            lines.push(Line::default());
+            lines.push(ui::keys(&[("enter", " starts it  "), ("esc", " drops")]));
             lines
         }),
         Some(Asking::Stop(name)) => ui::ask(f, |_| {
@@ -2101,6 +2197,8 @@ fn draw(term: &mut ratatui::DefaultTerminal, app: &mut App) -> std::io::Result<(
     }
     let tell = match &app.view.mode {
         Mode::Tell { to, text } => Some(Asking::Reply(to.name.clone(), text.clone())),
+        Mode::Rename { to, text } => Some(Asking::Rename(to.name.clone(), text.clone())),
+        Mode::NewThread(text) => Some(Asking::New(text.clone())),
         Mode::Stop(to) => Some(Asking::Stop(to.name.clone())),
         _ => None,
     };

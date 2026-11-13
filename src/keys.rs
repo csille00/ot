@@ -37,6 +37,9 @@ pub enum Act {
     Stop,
     /// Settle a T3 thread.
     Settle,
+    /// Rename one, or start a new one.
+    Rename,
+    NewThread,
     /// Find any T3 thread by its title or what was said in it.
     Find,
     /// The thread list beside a conversation: into it and out, shown or not.
@@ -244,6 +247,8 @@ pub const KEYS: &[Key] = &[
     k("s", "tell", "type something to the agent; enter sends it, once nobody is typing there", &[Hc], Act::Tell),
     k("x", "stop", "press the agent's stop key, once you say y", &[HcWorking], Act::Stop),
     k("S", "settle", "settle the T3 thread: T3 marks it done and it leaves the board", &[T3, Reply], Act::Settle),
+    k("e", "rename", "rename the T3 thread; enter renames it", &[T3, Reply, Side], Act::Rename),
+    k("n", "", "start a new T3 thread in this checkout's project and read it", &[Board, Transcript], Act::NewThread),
     k("ctrl-k", "", "find any T3 thread by its title or what was said in it", &[Board, Transcript], Act::Find),
     k("/", "", "the same", &[Board, Transcript], Act::Find),
     k("l", "ticket", "open the ticket it is for in Linear", &[TicketMr], Act::Ticket),
@@ -565,6 +570,7 @@ pub fn name(ev: &KeyEvent) -> String {
 pub fn edit(text: &mut String, key: &str) -> bool {
     match key {
         "backspace" => text.pop().is_some(),
+        "ctrl-u" => !std::mem::take(text).is_empty(),
         "space" => {
             text.push(' ');
             true

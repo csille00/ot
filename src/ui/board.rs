@@ -76,6 +76,13 @@ pub enum Mode {
     },
     /// Its stop key, waiting on y.
     Stop(Agent),
+    /// A new title for a T3 thread, being typed.
+    Rename {
+        to: Agent,
+        text: String,
+    },
+    /// The first message of a new T3 thread, being typed.
+    NewThread(String),
     /// Your change left in the review checkout, waiting on how it goes.
     Unpushed(Left),
     /// Its message as a new commit, being typed.
@@ -441,6 +448,18 @@ fn asking(s: &Screen, v: &View, w: usize) -> Vec<Line<'static>> {
             lines.extend(typed(text, w));
             lines.push(Line::default());
             lines.push(key_line(&[("enter", " sends  "), ("esc", " drops")]));
+        }
+        Mode::Rename { to, text } => {
+            lines.push(says(format!("rename {}:", to.name), DIM));
+            lines.extend(typed(text, w));
+            lines.push(Line::default());
+            lines.push(key_line(&[("enter", " renames  "), ("esc", " drops")]));
+        }
+        Mode::NewThread(text) => {
+            lines.push(says("a new T3 thread, in this checkout's project. what should it do?".into(), DIM));
+            lines.extend(typed(text, w));
+            lines.push(Line::default());
+            lines.push(key_line(&[("enter", " starts it  "), ("esc", " drops")]));
         }
         Mode::Stop(to) => {
             lines.push(says(format!("stop {}? it presses the agent's stop key", to.name), AMBER));
@@ -1048,6 +1067,8 @@ fn footer(s: &Screen, v: &View, right: usize) -> Line<'static> {
         | Mode::Note { .. }
         | Mode::Typing(_)
         | Mode::Tell { .. }
+        | Mode::Rename { .. }
+        | Mode::NewThread(_)
         | Mode::Stop(_)
         | Mode::Unpushed(_)
         | Mode::Message(..) => {}

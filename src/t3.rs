@@ -266,6 +266,32 @@ pub fn interrupt(address: &str) -> Result<bool, String> {
     dispatch(serde_json::json!({ "type": "thread.stop", "threadId": address })).map(|_| true)
 }
 
+/// Gives the thread a title of yours, as renaming it in T3 does.
+pub fn rename(address: &str, title: &str) -> Result<(), String> {
+    dispatch(serde_json::json!({ "type": "thread.metadata.update", "threadId": address, "title": title })).map(|_| ())
+}
+
+/// Starts a thread in the T3 project this checkout is in, `text` its first message; its id.
+pub fn start(text: &str) -> Result<String, String> {
+    let bin = bin().ok_or("no t3 here")?;
+    let mut child = Command::new(bin)
+        .args(["thread", "start", ".", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("t3: {e}"))?;
+    if let Some(mut i) = child.stdin.take() {
+        i.write_all(text.as_bytes()).map_err(|e| format!("t3: {e}"))?;
+    }
+    let out = child.wait_with_output().map_err(|e| format!("t3: {e}"))?;
+    if !out.status.success() {
+        return Err(last_line(&out.stderr));
+    }
+    let said = String::from_utf8_lossy(&out.stdout);
+    said.split_whitespace().find(|w| owns(w)).map(String::from).ok_or_else(|| format!("t3 started no thread: {}", said.trim()))
+}
+
 /// Settles the thread, which takes it off the board.
 pub fn settle(address: &str) -> Result<(), String> {
     dispatch(serde_json::json!({ "type": "thread.settle", "threadId": address })).map(|_| ())
