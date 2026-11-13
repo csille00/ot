@@ -277,6 +277,14 @@ for _, m in ipairs(api.nvim_buf_get_extmarks(buf, -1, 0, -1, { details = true })
 end
 check(has(virt, "function unused%(%) {"), "unused's removed lines are drawn")
 check(has(virt, "┃ kim"), "kim's thread hangs under its line")
+-- } goes to the change's comment from anywhere, and round again from the last.
+api.nvim_win_set_cursor(code(), { 1, 0 })
+press("}")
+check(code_line() == 8, "} puts the code on kim's comment, line 8, not " .. code_line())
+check(api.nvim_buf_get_name(api.nvim_win_get_buf(code())):find("sum.ts$") ~= nil, "} shows the comment's file")
+check(has(list(), "comment 1 of 1"), "the list says which comment it is on")
+press("}")
+check(code_line() == 8, "} from the last comment goes round to the first")
 -- A removed line wider than the code is cut into rows, as nvim wraps the
 -- line under it; virtual lines never wrap on their own.
 local function removed_rows()

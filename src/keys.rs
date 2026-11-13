@@ -69,6 +69,9 @@ pub enum Act {
     Collapse,
     NextHunk,
     PrevHunk,
+    /// The review's next and previous comment, in the whole change.
+    NextComment,
+    PrevComment,
     PageDown,
     PageUp,
     LineDown,
@@ -371,6 +374,10 @@ pub const KEYS: &[Key] = &[
         &[List, Code],
         Act::PrevHunk,
     ),
+    k("}", "comment", "the next comment in the change, threads and your drafts; from the last, the first", &[List], Act::NextComment),
+    k("{", "", "the comment before", &[List], Act::PrevComment),
+    k("<leader>m}", "", "the next comment in the change", &[Code], Act::NextComment),
+    k("<leader>m{", "", "the comment before", &[Code], Act::PrevComment),
     k(
         "ctrl-d",
         "",

@@ -1753,6 +1753,96 @@ local function aside()
 end
 
 -- v: the mark kept in ot's file of them, which other reviews read too.
+-- } and {: the next or previous comment in the whole change, threads and your
+-- drafts, in file and line order, round from the last to the first.
+local function spots()
+  local out = {}
+  local function at(f, line, old)
+    if line then
+      return line
+    end
+    for _, b in ipairs(S.d.files[f] and S.d.files[f].removed or {}) do
+      for _, l in ipairs(b.lines) do
+        if l.old == old then
+          return b.at
+        end
+      end
+    end
+  end
+  for _, t in ipairs(S.threads) do
+    local line = t.file and at(t.file, t.line, t.old)
+    if line then
+      local who = t.notes[1] and t.notes[1].author or ""
+      local body = t.notes[1] and t.notes[1].body or ""
+      table.insert(out, { file = t.file, line = line, what = (t.resolved and "resolved · " or "") .. who .. ": " .. body })
+    end
+  end
+  for _, d in ipairs(S.drafts) do
+    local line = d.file and not d.reply_to and at(d.file, d.line, d.old)
+    if line then
+      table.insert(out, { file = d.file, line = line, what = "your draft: " .. d.body })
+    end
+  end
+  table.sort(out, function(a, b)
+    return a.file < b.file or (a.file == b.file and a.line < b.line)
+  end)
+  return out
+end
+
+local function comment_jump(by)
+  local all = spots()
+  if #all == 0 then
+    S.say = { "no comments on this change", "OtDim" }
+    return render()
+  end
+  local f, line = 0, 0
+  if S.shown and S.shown.kind ~= "overview" and S.shown.kind ~= "tour" then
+    f = S.shown.kind == "file" and S.shown.i or thing(S.shown).file
+    line = api.nvim_win_get_cursor(S.code)[1]
+  end
+  local to
+  for i = by > 0 and 1 or #all, by > 0 and #all or 1, by do
+    local s = all[i]
+    local after = s.file > f or (s.file == f and s.line > line)
+    local before = s.file < f or (s.file == f and s.line < line)
+    if (by > 0 and after) or (by < 0 and before) then
+      to = i
+      break
+    end
+  end
+  to = to or (by > 0 and 1 or #all)
+  local s = all[to]
+  -- The list's row it is in, the tightest symbol round it, so the code follows that row.
+  local row, span
+  for _, r in ipairs(S.rows) do
+    if resting(r) and r.kind ~= "overview" and r.kind ~= "tour" then
+      local t = thing(r)
+      local file = r.kind == "file" and r.i or t.file
+      if file == s.file then
+        local lines = r.kind == "symbol" and t.lines
+        local inside = not lines or (lines[1] <= s.line and s.line <= lines[2])
+        local size = lines and (lines[2] - lines[1]) or math.huge
+        if inside and (not span or size < span) then
+          row, span = r, size
+        end
+      end
+    end
+  end
+  local what = s.what:gsub("%s+", " ")
+  S.say = { ("comment %d of %d · %s"):format(to, #all, what), "OtOrange" }
+  if row then
+    S.at = row.id
+    render()
+  else
+    S.shown, S.hunk = { kind = "file", id = (current() or {}).id, i = s.file }, nil
+    local buf = show_file(s.file)
+    winbar(s.file)
+    api.nvim_buf_clear_namespace(buf, here_ns, 0, -1)
+    render()
+  end
+  center(s.line, s.line, 0, s.line)
+end
+
 local function viewed()
   local r = current()
   if not resting(r) or r.kind == "overview" or r.kind == "tour" then
@@ -2427,6 +2517,12 @@ list_acts = {
   PrevStep = function()
     tour(-1)
   end,
+  NextComment = function()
+    comment_jump(1)
+  end,
+  PrevComment = function()
+    comment_jump(-1)
+  end,
   PageDown = scroll("<C-d>"),
   PageUp = scroll("<C-u>"),
   LineDown = scroll("<C-e>"),
@@ -2447,6 +2543,8 @@ code_acts = {
   NextHunk = list_acts.NextHunk,
   PrevHunk = list_acts.PrevHunk,
   NextStep = list_acts.NextStep,
+  NextComment = list_acts.NextComment,
+  PrevComment = list_acts.PrevComment,
   -- Back to the step you came from.
   PrevStep = function()
     tour(0)
