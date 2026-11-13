@@ -1652,6 +1652,10 @@ fn side_act(app: &mut App, act: Act) {
             }
         }
         Act::Threads | Act::FocusRight => app.side.cursor = None,
+        Act::NewThread => {
+            app.side.cursor = None;
+            app.view.mode = Mode::NewThread(String::new());
+        }
         Act::Rename => {
             if let Some(a) = threads.get(at) {
                 app.view.mode = Mode::Rename { text: a.name.clone(), to: a.clone() };
@@ -2651,6 +2655,11 @@ mod tests {
         app.width = 100;
         key(&mut app, "ctrl-l");
         assert!(!app.panel.view.focused, "no MR shown, nothing to focus");
+        app.agents.push(hc::Agent { address: "0621b23e-9a63-41b0-bd6f-1798e8a08f3b".into(), ..match &app.shown { Shown::Thread { agent, .. } => agent.clone(), _ => unreachable!() } });
+        key(&mut app, "tab");
+        assert!(app.side.cursor.is_some(), "tab goes into the thread list");
+        key(&mut app, "n");
+        assert!(matches!(app.view.mode, Mode::NewThread(_)) && app.side.cursor.is_none(), "n there asks what a new thread should do");
     }
 
     #[test]

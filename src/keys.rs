@@ -257,6 +257,7 @@ pub const KEYS: &[Key] = &[
     k("S", "settle", "settle the T3 thread: T3 marks it done and it leaves the board", &[T3, Reply], Act::Settle),
     k("e", "rename", "rename the T3 thread; enter renames it", &[T3, Reply, Side], Act::Rename),
     k("n", "", "start a new T3 thread in this checkout's project and read it", &[Board, Transcript], Act::NewThread),
+    k("n", "new thread", "start a new T3 thread in this checkout's project and read it", &[Side], Act::NewThread),
     k("ctrl-k", "", "find any T3 thread by its title or what was said in it", &[Board, Transcript], Act::Find),
     k("/", "", "the same", &[Board, Transcript], Act::Find),
     k("l", "ticket", "open the ticket it is for in Linear", &[TicketMr], Act::Ticket),
