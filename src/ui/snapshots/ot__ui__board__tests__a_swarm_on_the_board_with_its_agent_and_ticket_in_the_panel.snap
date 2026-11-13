@@ -1,5 +1,6 @@
 ---
 source: src/ui/board.rs
+assertion_line: 1347
 expression: "frame_of(fixture::swarm(), &HashMap::new(), 110, 44, |b, v|\n{ while v.at != Some(Pick::Mr(302)) { v.step(b, 1); } })"
 ---
  ot  team/app                                                                                     as of 13:44
@@ -45,4 +46,4 @@ expression: "frame_of(fixture::swarm(), &HashMap::new(), 110, 44, |b, v|\n{ whil
   ●━━━━━━━━━●━━━━━━━━━●━━━━━━━━━●─────────○─────────○
   ticket    agent     draft     review    merged    live
  ────────────────────────────────────────────────────────────────────────────────────────────────────────────
-  enter open  y link  w web  T tour  t agent  l ticket  m merge  b rebase  N pipeline  L land          ? keys
+  enter open  y link  w web  T tour  t agent  i ticket  m merge  b rebase  N pipeline  L land          ? keys

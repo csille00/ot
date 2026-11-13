@@ -1,4 +1,5 @@
 //! Drawing: the palette, and the line-building both screens share.
+pub mod blurb;
 pub mod board;
 pub mod finder;
 pub mod md;

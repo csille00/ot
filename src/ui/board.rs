@@ -76,6 +76,13 @@ pub enum Mode {
     },
     /// Its stop key, waiting on y.
     Stop(Agent),
+    /// An MR's title and description, read over the board: what GitLab said, None
+    /// while it is asked, and how far it is scrolled.
+    Blurb {
+        iid: u64,
+        text: Option<Result<String, String>>,
+        scroll: usize,
+    },
     /// A new title for a T3 thread, being typed.
     Rename {
         to: Agent,
@@ -455,6 +462,7 @@ fn asking(s: &Screen, v: &View, w: usize) -> Vec<Line<'static>> {
             lines.push(Line::default());
             lines.push(key_line(&[("enter", " renames  "), ("esc", " drops")]));
         }
+        Mode::Blurb { .. } => {}
         Mode::NewThread(text) => {
             lines.push(says("a new T3 thread, in this checkout's project. what should it do?".into(), DIM));
             lines.extend(typed(text, w));
@@ -1068,6 +1076,7 @@ fn footer(s: &Screen, v: &View, right: usize) -> Line<'static> {
         | Mode::Typing(_)
         | Mode::Tell { .. }
         | Mode::Rename { .. }
+        | Mode::Blurb { .. }
         | Mode::NewThread(_)
         | Mode::Stop(_)
         | Mode::Unpushed(_)
@@ -1360,7 +1369,8 @@ mod tests {
         assert_eq!(keys::act("t", &at), Some(Act::Agent));
         assert_eq!(keys::act("m", &at), None, "nothing to merge yet");
         let v = View { at: Some(Pick::Mr(302)), ..View::default() };
-        assert_eq!(keys::act("l", &v.places(&snap, &b)), Some(Act::Ticket), "an MR for a ticket opens it with l");
+        assert_eq!(keys::act("i", &v.places(&snap, &b)), Some(Act::Ticket), "an MR for a ticket opens it with i");
+        assert_eq!(keys::act("l", &v.places(&snap, &b)), Some(Act::Describe), "l reads the MR's description");
     }
 
     #[test]

@@ -115,6 +115,11 @@ enum Msg {
         read: Vec<u64>,
         result: Result<Vec<land::Verdict>, String>,
     },
+    /// An MR's description, read for l, or why it couldn't be.
+    Blurb {
+        iid: u64,
+        result: Result<String, String>,
+    },
     /// An MR's description, read for c, or why it couldn't be.
     Described {
         iid: u64,
@@ -1320,6 +1325,13 @@ fn run(
                     app.load_thread();
                 }
                 Msg::Described { iid, result } => app.on_described(iid, result),
+                Msg::Blurb { iid, result } => {
+                    if let Mode::Blurb { iid: shown, text, .. } = &mut app.view.mode {
+                        if *shown == iid {
+                            *text = Some(result);
+                        }
+                    }
+                }
                 Msg::Slack(Ok(emails)) => app.slack = emails,
                 Msg::Slack(Err(e)) => app.note = Some(format!("c can't complete from Slack: {e}")),
                 Msg::Members(Ok(names)) => app.members = names,
@@ -1922,6 +1934,30 @@ fn answer(app: &mut App, name: &str) {
                 }
             }
         }
+        Mode::Blurb { iid, text, mut scroll } => {
+            match name {
+                "esc" | "q" | "l" | "enter" => return,
+                "j" | "down" => scroll += 1,
+                "k" | "up" => scroll = scroll.saturating_sub(1),
+                "ctrl-d" | "space" => scroll += 10,
+                "ctrl-u" => scroll = scroll.saturating_sub(10),
+                "g" => scroll = 0,
+                "G" => scroll = usize::MAX / 2,
+                "w" => {
+                    if let Some(m) = app.snap.mr(iid) {
+                        app.note = term::open(&m.url);
+                    }
+                }
+                "y" => {
+                    if let Some(m) = app.snap.mr(iid) {
+                        term::copy(&m.url);
+                        app.note = Some(format!("copied {}", m.url));
+                    }
+                }
+                _ => {}
+            }
+            app.view.mode = Mode::Blurb { iid, text, scroll };
+        }
         Mode::Rename { to, mut text } => {
             match name {
                 "esc" => {}
@@ -2061,6 +2097,16 @@ app.shown = Shown::Session {
                     agent: w.agent.clone(),
                     view: sessionui::View::at_end(),
                 };
+            }
+        }
+        Act::Describe => {
+            if let Some(iid) = app.picked().map(|m| m.iid) {
+                app.view.mode = Mode::Blurb { iid, text: None, scroll: 0 };
+                let (tx, gitlab, project) = (app.tx.clone(), app.gitlab.clone(), app.cfg.project.clone());
+                std::thread::spawn(move || {
+                    let result = gitlab.get().and_then(|g| g.description(&project, iid));
+                    let _ = tx.send(Msg::Blurb { iid, result });
+                });
             }
         }
         Act::Ticket => {
@@ -2491,6 +2537,11 @@ fn draw(term: &mut ratatui::DefaultTerminal, app: &mut App) -> std::io::Result<(
             hills: &app.hills,
         };
         boardui::draw(f, &s, &mut app.view);
+        if let Mode::Blurb { iid, text, scroll } = &mut app.view.mode {
+            if let Some(m) = app.snap.mrs.iter().find(|m| m.iid == *iid) {
+                ui::blurb::draw(f, m, text.as_ref(), scroll);
+            }
+        }
         if let Some(fd) = app.finder.as_mut() {
             ui::finder::draw(f, fd, &statuses, s.now);
         }
