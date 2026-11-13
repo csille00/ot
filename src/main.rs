@@ -1506,8 +1506,8 @@ fn send_composed(app: &mut App, c: compose::Compose) {
     });
 }
 
-/// The conversation being read, in nvim to select and yank from: a floating zellij
-/// pane over ot inside zellij, else this terminal until nvim quits.
+/// The conversation being read, in nvim to select and yank from, in this terminal
+/// until nvim quits.
 fn select(app: &mut App) -> Next {
     let (name, turns) = match &app.shown {
         Shown::Thread { agent, turns, .. } => (agent.name.clone(), turns.clone()),
@@ -1528,21 +1528,7 @@ fn select(app: &mut App) -> Next {
             return Next::Stay;
         }
     };
-    if std::env::var_os("ZELLIJ").is_none() {
-        return Next::Nvim(args);
-    }
-    let ran = Command::new("zellij")
-        .args(["action", "new-pane", "--floating", "--close-on-exit", "--width", "90%", "--height", "90%", "--x", "5%", "--y", "5%", "--name", &name, "--", "nvim"])
-        .args(&args)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .output();
-    match ran {
-        Ok(o) if !o.status.success() => app.note = Some(format!("zellij opened no pane: {}", String::from_utf8_lossy(&o.stderr).trim())),
-        Err(e) => app.note = Some(format!("zellij: {e}")),
-        _ => {}
-    }
-    Next::Stay
+    Next::Nvim(args)
 }
 
 /// A shell where the session or thread being read works: a zellij pane beside ot
