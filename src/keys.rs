@@ -53,6 +53,10 @@ pub enum Act {
     MrPanel,
     DiffDown,
     DiffUp,
+    /// Focus the part of a conversation's view to the left or right: its thread list,
+    /// the conversation, its MR.
+    FocusLeft,
+    FocusRight,
     /// Open a row's ticket in Linear.
     Ticket,
     /// The music screen.
@@ -151,6 +155,8 @@ pub enum Place {
     Side,
     /// Reading a thread that has an MR, shown beside it.
     ThreadMr,
+    /// In that MR, focused.
+    MrFocus,
     /// On the music screen.
     Music,
     /// On a search's results there.
@@ -287,6 +293,24 @@ pub const KEYS: &[Key] = &[
     k("ctrl-f", "", "the MR's diff down a page", &[ThreadMr], Act::DiffDown),
     k("ctrl-b", "", "the MR's diff up a page", &[ThreadMr], Act::DiffUp),
     k("m", "", "show or hide the thread's MR beside it", &[ThreadMr], Act::MrPanel),
+    k("ctrl-l", "", "focus the MR beside it; from the thread list, the conversation", &[ThreadMr, Side], Act::FocusRight),
+    k("ctrl-h", "", "focus the thread list", &[Transcript], Act::FocusLeft),
+    k("backspace", "", "the same, where ctrl-h comes as backspace", &[Transcript], Act::FocusLeft),
+    k("j", "", "the diff down a line", &[MrFocus], Act::Down),
+    k("k", "", "the diff up a line", &[MrFocus], Act::Up),
+    k("down", "", "the diff down a line", &[MrFocus], Act::Down),
+    k("up", "", "the diff up a line", &[MrFocus], Act::Up),
+    k("ctrl-d", "", "the diff down half a page", &[MrFocus], Act::PageDown),
+    k("ctrl-u", "", "the diff up half a page", &[MrFocus], Act::PageUp),
+    k("ctrl-f", "", "the diff down half a page", &[MrFocus], Act::PageDown),
+    k("ctrl-b", "", "the diff up half a page", &[MrFocus], Act::PageUp),
+    k("g", "", "the diff's top", &[MrFocus], Act::Top),
+    k("G", "", "the diff's end", &[MrFocus], Act::Bottom),
+    k("o", "review", "open the MR's review", &[MrFocus], Act::Review),
+    k("ctrl-h", "back", "back to the conversation", &[MrFocus], Act::FocusLeft),
+    k("backspace", "", "the same, where ctrl-h comes as backspace", &[MrFocus], Act::FocusLeft),
+    k("esc", "", "back to the conversation", &[MrFocus], Act::FocusLeft),
+    k("q", "", "back to the board", &[MrFocus], Act::Leave),
     k("j", "", "next thread", &[Side], Act::Down),
     k("k", "", "previous thread", &[Side], Act::Up),
     k("down", "", "next thread", &[Side], Act::Down),

@@ -298,11 +298,11 @@ struct App {
     patches: HashMap<u64, (String, Result<String, String>)>,
 }
 
-/// The MR panel beside a thread: hidden by m, and how far its diff is scrolled.
+/// The MR panel beside a thread: hidden by m, and where its diff is.
 #[derive(Default)]
 struct Panel {
     hidden: bool,
-    scroll: usize,
+    view: ui::mr::View,
 }
 
 /// The thread list beside a conversation: hidden by b, and the thread its cursor
@@ -468,6 +468,9 @@ impl App {
                 }
                 if self.side.cursor.is_some() {
                     return Some(("threads", vec![keys::Place::Side]));
+                }
+                if self.panel.view.focused && self.panel_shows() {
+                    return Some(("mr", vec![keys::Place::MrFocus]));
                 }
                 let mut at = vec![keys::Place::Transcript];
                 if self.reply_to().is_some() {
@@ -1043,7 +1046,7 @@ impl App {
             i.forget();
         }
         let turns = self.read.get(&agent.address).cloned().unwrap_or_default();
-        self.panel.scroll = 0;
+        self.panel.view = ui::mr::View::default();
         self.shown = Shown::Thread { agent, turns, view: sessionui::View::at_end() };
         self.load_thread();
     }
@@ -1064,6 +1067,11 @@ impl App {
                 Some((a.address.clone(), format!("!{}", m.iid)))
             })
             .collect()
+    }
+
+    /// Whether the MR panel is drawn beside the conversation now.
+    fn panel_shows(&self) -> bool {
+        !self.panel.hidden && self.width >= 140 && self.thread_mr().is_some()
     }
 
     /// The MR of the thread being read: the one it opened, else the one its own branch is;
@@ -1643,7 +1651,7 @@ fn side_act(app: &mut App, act: Act) {
                 }
             }
         }
-        Act::Threads => app.side.cursor = None,
+        Act::Threads | Act::FocusRight => app.side.cursor = None,
         Act::Rename => {
             if let Some(a) = threads.get(at) {
                 app.view.mode = Mode::Rename { text: a.name.clone(), to: a.clone() };
@@ -1661,6 +1669,27 @@ fn side_act(app: &mut App, act: Act) {
 fn session_act(app: &mut App, act: Act) {
     if app.side.cursor.is_some() {
         return side_act(app, act);
+    }
+    if app.panel.view.focused && !app.panel_shows() {
+        app.panel.view.focused = false;
+    }
+    if app.panel.view.focused {
+        let v = &mut app.panel.view;
+        match act {
+            Act::Down => v.step(1),
+            Act::Up => v.step(-1),
+            Act::PageDown => v.page(1),
+            Act::PageUp => v.page(-1),
+            Act::Top => v.scroll = 0,
+            Act::Bottom => v.scroll = usize::MAX,
+            Act::FocusLeft => v.focused = false,
+            Act::Leave => {
+                v.focused = false;
+                app.shown = Shown::Board;
+            }
+            _ => {}
+        }
+        return;
     }
     match act {
         Act::Threads => {
@@ -1683,8 +1712,19 @@ fn session_act(app: &mut App, act: Act) {
             return;
         }
         Act::DiffDown | Act::DiffUp => {
-            let page = (app.width / 4).max(10);
-            app.panel.scroll = if act == Act::DiffDown { app.panel.scroll + page } else { app.panel.scroll.saturating_sub(page) };
+            app.panel.view.page(if act == Act::DiffDown { 2 } else { -2 });
+            return;
+        }
+        Act::FocusRight => {
+            if app.panel_shows() {
+                app.panel.view.focused = true;
+            }
+            return;
+        }
+        Act::FocusLeft => {
+            if !app.side_threads().is_empty() {
+                return session_act(app, Act::Threads);
+            }
             return;
         }
         Act::NextThread | Act::PrevThread => {
@@ -2346,7 +2386,7 @@ fn draw(term: &mut ratatui::DefaultTerminal, app: &mut App) -> std::io::Result<(
     let mr = app.thread_mr().filter(|_| !app.panel.hidden && width >= 140).cloned();
     let patch = mr.as_ref().and_then(|m| app.patches.get(&m.iid)).map(|(_, p)| p.clone());
     let panel = mr.as_ref().map(|m| (m, patch.as_ref()));
-    let panel_scroll = &mut app.panel.scroll;
+    let panel_scroll = &mut app.panel.view;
     if let Shown::Session { id, agent, view } = &mut app.shown {
         // on_sessions keeps the one shown on the board, and a session's
         // agents stay in it.
@@ -2591,6 +2631,26 @@ mod tests {
         while app.view.at != Some(Pick::Mr(iid)) {
             app.view.step(&app.board, 1);
         }
+    }
+
+    #[test]
+    fn ctrl_l_focuses_a_threads_mr_and_ctrl_h_comes_back() {
+        let (mut app, _rx) = app(Arc::new(Recorder::default()));
+        let mr = app.snap.mrs.iter().find(|m| m.reach.is_none()).unwrap().clone();
+        let agent = hc::Agent { address: "bba1a549-60f8-4425-bb4e-569c328a3cc4".into(), name: "a thread".into(), status: hc::Status::Stopped, said: String::new(), at: 0, pid: None, branch: mr.source.clone() };
+        app.shown = Shown::Thread { agent, turns: vec![], view: sessionui::View::at_end() };
+        app.width = 200;
+        assert_eq!(app.thread_mr().map(|m| m.iid), Some(mr.iid));
+        key(&mut app, "ctrl-l");
+        assert!(app.panel.view.focused, "ctrl-l focuses the MR");
+        assert_eq!(app.places().map(|p| p.0), Some("mr"));
+        key(&mut app, "j");
+        assert_eq!(app.panel.view.scroll, 1, "j scrolls the MR's diff, not the conversation");
+        key(&mut app, "ctrl-h");
+        assert!(!app.panel.view.focused, "ctrl-h goes back to the conversation");
+        app.width = 100;
+        key(&mut app, "ctrl-l");
+        assert!(!app.panel.view.focused, "no MR shown, nothing to focus");
     }
 
     #[test]

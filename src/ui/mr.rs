@@ -275,10 +275,30 @@ fn cut(s: &str, w: usize) -> String {
 }
 
 /// The thread's MR down the right of the screen: how it stands, then its diff from `scroll`.
-pub fn panel(f: &mut ratatui::Frame, area: ratatui::layout::Rect, m: &Mr, patch: Option<&Result<String, String>>, scroll: &mut usize, now: i64) {
+/// Where the panel's diff is: how far scrolled, how many lines the last draw had room
+/// for, and whether the panel has the keys (ctrl-l).
+#[derive(Default)]
+pub struct View {
+    pub scroll: usize,
+    pub room: usize,
+    pub focused: bool,
+}
+
+impl View {
+    pub fn step(&mut self, by: isize) {
+        self.scroll = self.scroll.saturating_add_signed(by);
+    }
+
+    pub fn page(&mut self, by: isize) {
+        self.step(by * (self.room / 2).max(1) as isize);
+    }
+}
+
+pub fn panel(f: &mut ratatui::Frame, area: ratatui::layout::Rect, m: &Mr, patch: Option<&Result<String, String>>, v: &mut View, now: i64) {
     use ratatui::layout::Rect;
+    let edge = if v.focused { fg(AMBER) } else { fg(FAINT) };
     for y in area.y..area.bottom() {
-        f.render_widget(Line::styled("│", fg(FAINT)), Rect::new(area.x, y, 1, 1));
+        f.render_widget(Line::styled(if v.focused { "┃" } else { "│" }, edge), Rect::new(area.x, y, 1, 1));
     }
     let inner = Rect { x: area.x + 1, width: area.width.saturating_sub(1), ..area };
     let w = inner.width.saturating_sub(2) as usize;
@@ -290,15 +310,17 @@ pub fn panel(f: &mut ratatui::Frame, area: ratatui::layout::Rect, m: &Mr, patch:
         None => vec![],
     };
     let room = (inner.height as usize).saturating_sub(head.len() + 1);
-    *scroll = (*scroll).min(body.len().saturating_sub(room));
-    let shown = body.len().min(*scroll + room);
+    v.room = room;
+    v.scroll = v.scroll.min(body.len().saturating_sub(room));
+    let shown = body.len().min(v.scroll + room);
     let mut lines = head;
-    lines.extend(body[*scroll..shown].iter().cloned());
+    lines.extend(body[v.scroll..shown].iter().cloned());
     f.render_widget(ratatui::widgets::Paragraph::new(lines), inner);
     if !body.is_empty() {
-        let at = format!(" {}–{} of {}  ctrl-f/ctrl-b  o review  m hide ", *scroll + 1, shown, body.len());
+        let keys = if v.focused { "j/k ctrl-d/ctrl-u  o review  ctrl-h back" } else { "ctrl-l focus  o review  m hide" };
+        let at = format!(" {}–{} of {}  {keys} ", v.scroll + 1, shown, body.len());
         let y = inner.bottom().saturating_sub(1);
-        f.render_widget(Line::styled(at, fg(FAINT)).right_aligned(), Rect { y, height: 1, ..inner });
+        f.render_widget(Line::styled(at, if v.focused { fg(AMBER) } else { fg(FAINT) }).right_aligned(), Rect { y, height: 1, ..inner });
     }
 }
 
