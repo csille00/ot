@@ -2737,7 +2737,7 @@ local function chat_files()
   local dir = vim.fn.expand("~/.cache/ot/chat")
   vim.fn.mkdir(dir, "p")
   local base = ("%s/%d-%s"):format(dir, S.d.iid, (S.d.head or ""):sub(1, 12))
-  return base .. ".md", base .. ".sid"
+  return base .. ".md", base .. ".sid", base .. ".told"
 end
 
 local function chat_append(text)
@@ -2768,6 +2768,53 @@ local function chat_where()
   return ""
 end
 
+-- All Claude needs to know of the change: the MR, what is said on it, and
+-- the tour when there is one, in full. Sent with the first question, and again
+-- whenever it has changed since (a tour that finished, new comments).
+local function chat_context()
+  local d = S.d
+  local out = {
+    ("I'm reviewing GitLab MR %s, %q, %s into %s, by %s: %s."):format(d.name, d.title, d.source or "?", d.target or "?", d.author or "?", d.url),
+    ("This directory is a checkout at the MR's head (%s). The change is `git diff %s %s`."):format(d.head or "?", d.base or "?", d.head or "?"),
+    "Its description:\n\n" .. (S.description ~= "" and S.description or "(none)"),
+  }
+  local files = {}
+  for _, f in ipairs(d.files or {}) do
+    files[#files + 1] = "- " .. f.path
+  end
+  if #files > 0 then
+    out[#out + 1] = "The files it changes:\n" .. table.concat(files, "\n")
+  end
+  local said = {}
+  for _, t in ipairs(S.threads or {}) do
+    local f = t.file and d.files[t.file]
+    local at = f and ("%s:%s"):format(f.path, t.line or t.old or "?") or "the MR"
+    local notes = {}
+    for _, n in ipairs(t.notes or {}) do
+      notes[#notes + 1] = ("  %s: %s"):format(n.author or "?", (n.body or ""):gsub("\n", "\n    "))
+    end
+    said[#said + 1] = ("- On %s%s:\n%s"):format(at, t.resolved and " (resolved)" or "", table.concat(notes, "\n"))
+  end
+  if #said > 0 then
+    out[#out + 1] = "What reviewers have said on it:\n" .. table.concat(said, "\n")
+  end
+  local t = S.tour
+  if t and t.summary then
+    local parts = { "Claude's tour of the change, which I'm reading" .. (t.reading and " (still being written)" or "") .. ":", t.summary }
+    for _, c in ipairs(t.cases or {}) do
+      parts[#parts + 1] = ("- When %s: before, %s; now, %s"):format(c.when or "", c.before or "", c.now or "")
+    end
+    for i, st in ipairs(t.steps or {}) do
+      parts[#parts + 1] = ("Step %d, %s (%s:%d):\n%s%s"):format(i, st.title or "", st.path, st.line, st.says or "", (st.ask or "") ~= "" and ("\nIt asks: " .. st.ask) or "")
+    end
+    for _, fl in ipairs(t.flags or {}) do
+      parts[#parts + 1] = ("Design flag at %s:%d, %s:\n%s%s"):format(fl.path, fl.line, fl.title or "", fl.says or "", (fl.instead or "") ~= "" and ("\nInstead: " .. fl.instead) or "")
+    end
+    out[#out + 1] = table.concat(parts, "\n\n")
+  end
+  return table.concat(out, "\n\n")
+end
+
 local function chat_prompt(q)
   local where = chat_where()
   if #chat.context > 0 then
@@ -2778,24 +2825,19 @@ local function chat_prompt(q)
     chat.context = {}
     q = table.concat(parts, "\n\n") .. "\n\n" .. q
   end
-  if chat.sid then
-    return (where ~= "" and (where .. "\n\n") or "") .. q
-  end
-  local d = S.d
-  local t = S.tour or {}
-  local steps = {}
-  for i, st in ipairs(t.steps or {}) do
-    steps[#steps + 1] = ("%d. %s (%s:%d)"):format(i, st.title or "", st.path, st.line)
-  end
-  return table.concat({
-    ("I'm reviewing GitLab MR %s, %q, %s into %s, by %s: %s."):format(d.name, d.title, d.source or "?", d.target or "?", d.author or "?", d.url),
-    ("This directory is a checkout at the MR's head (%s). The change is `git diff %s %s`."):format(d.head or "?", d.base or "?", d.head or "?"),
-    "Its description:\n\n" .. (S.description ~= "" and S.description or "(none)"),
-    t.summary and ("A tour of the change says:\n\n" .. t.summary .. "\n\n" .. table.concat(steps, "\n")) or "",
-    "Answer my questions about this change. Read the code to back what you say, and keep answers short. Don't edit anything.",
+  local ctx = chat_context()
+  local told = select(3, chat_files())
+  local sum = vim.fn.sha256(ctx)
+  local fresh = not (chat.sid and vim.fn.filereadable(told) == 1 and vim.fn.readfile(told)[1] == sum)
+  vim.fn.writefile({ sum }, told)
+  return table.concat(vim.tbl_filter(function(p)
+    return p ~= ""
+  end, {
+    fresh and (chat.sid and ("What I'm reviewing, as it stands now:\n\n" .. ctx) or ctx) or "",
+    not chat.sid and "Answer my questions about this change. Read the code to back what you say, and keep answers short. Don't edit anything." or "",
     where,
     q,
-  }, "\n\n")
+  }), "\n\n")
 end
 
 local function chat_ask(q)
