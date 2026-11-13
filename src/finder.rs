@@ -233,6 +233,23 @@ fn said(db: &Connection, id: &str) -> rusqlite::Result<Vec<Said>> {
     Ok(said)
 }
 
+/// The T3 thread a Claude Code session is, by the session's id: its address and title.
+/// T3 keeps it after the session's process is gone, so a done thread is found too.
+pub fn thread_of_session(session: &str) -> Option<(String, String)> {
+    let db = connect().ok()?;
+    db.query_row(
+        "SELECT p.thread_id, COALESCE(t.title, '')
+           FROM orchestration_v2_projection_provider_threads p
+           LEFT JOIN orchestration_v2_projection_threads t ON t.thread_id = p.thread_id
+          WHERE json_extract(p.payload_json, '$.nativeThreadRef.nativeId') = ?1
+            AND (t.deleted_at IS NULL)
+          ORDER BY p.updated_at DESC LIMIT 1",
+        [session],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .ok()
+}
+
 /// The thread's last `most` messages, oldest first, from T3's database: what
 /// `t3 thread show` says, in milliseconds instead of a second.
 pub fn conversation(id: &str, most: usize) -> Result<Vec<crate::claude::Turn>, String> {

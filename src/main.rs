@@ -219,6 +219,8 @@ struct Load {
 }
 
 struct App {
+    /// By Claude Code session id, the T3 thread it is, if any, as T3's database says.
+    session_threads: std::cell::RefCell<HashMap<String, Option<(String, String)>>>,
     cfg: Config,
     gitlab: Shared,
     writer: Arc<dyn Writer>,
@@ -357,6 +359,7 @@ impl App {
         let hidden = cache::hidden(&cfg.project);
         let server = nvim::Server::new(writer.clone(), gitlab.clone());
         let mut app = App {
+            session_threads: Default::default(),
             cfg,
             gitlab,
             writer,
@@ -1138,8 +1141,22 @@ impl App {
         match &self.shown {
             Shown::Thread { agent, .. } => Some(agent.clone()),
             Shown::Session { id, agent: None, .. } => {
-                let s = self.sessions.iter().find(|s| s.id == *id)?;
-                self.agents.iter().find(|a| t3::owns(&a.address) && a.pid.is_some() && a.pid == s.pid).cloned()
+                let s = self.sessions.iter().find(|s| s.id == *id);
+                if let Some(a) = s.and_then(|s| self.agents.iter().find(|a| t3::owns(&a.address) && a.pid.is_some() && a.pid == s.pid)) {
+                    return Some(a.clone());
+                }
+                // Its process may be gone, as a done thread's is: T3 still knows the session.
+                let found = self.session_threads.borrow_mut().entry(id.clone()).or_insert_with(|| finder::thread_of_session(id)).clone();
+                let (address, name) = found?;
+                Some(self.agents.iter().find(|a| a.address == address).cloned().unwrap_or(hc::Agent {
+                    address,
+                    name,
+                    status: hc::Status::Stopped,
+                    said: String::new(),
+                    at: 0,
+                    pid: None,
+                    branch: String::new(),
+                }))
             }
             _ => None,
         }
@@ -1620,6 +1637,10 @@ fn key(app: &mut App, name: &str) -> Next {
         return Next::Stay;
     };
     let Some(act) = keys::act(name, &places) else {
+        // s where there is nobody to reply to: say why, rather than nothing.
+        if name == "s" && matches!(app.shown, Shown::Session { .. }) && places.contains(&keys::Place::Transcript) {
+            app.note = Some("s replies to T3 threads; this Claude session isn't one (t opens a shell where it works)".into());
+        }
         return Next::Stay;
     };
     match &app.shown {
