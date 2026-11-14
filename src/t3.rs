@@ -157,12 +157,13 @@ impl Reader {
                 let status = t["status"].as_str().unwrap_or_default();
                 let updated = t["updatedAt"].as_str().unwrap_or_default().to_string();
                 let at = updated.parse::<jiff::Timestamp>().map_or(now, |t| t.as_second());
+                // Every thread's link is kept, for w on one read from the thread list.
+                if let Some(l) = t["link"].as_str() {
+                    found.insert(id.clone(), l.to_string());
+                }
                 let settled = t["settled"].as_bool().unwrap_or(false);
                 if status != "running" && (settled || now - at > RECENT) {
                     return None;
-                }
-                if let Some(l) = t["link"].as_str() {
-                    found.insert(id.clone(), l.to_string());
                 }
                 let open = t["pullRequests"].as_array().into_iter().flatten().filter(|p| p["state"] == "open");
                 let open: Vec<(String, u64)> = open.filter_map(|p| Some((p["repository"].as_str()?.to_string(), p["number"].as_u64()?))).collect();

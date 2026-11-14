@@ -1936,8 +1936,21 @@ fn side_act(app: &mut App, act: Act) {
             app.side.cursor = None;
             app.shown = Shown::Board;
         }
+        Act::Web => {
+            if let Some(a) = threads.get(at) {
+                open_in_t3(app, &a.address);
+            }
+        }
         _ => {}
     }
+}
+
+/// Opens the thread's page in T3, or copies its link over ssh.
+fn open_in_t3(app: &mut App, address: &str) {
+    app.note = match t3::link(address) {
+        Some(link) => term::open(&link),
+        None => Some("T3 hasn't given a link for this thread yet".into()),
+    };
 }
 
 /// The keys of a session being read.
@@ -2023,8 +2036,8 @@ fn session_act(app: &mut App, act: Act) {
             return;
         }
         Act::Web => {
-            if let Some(link) = app.reply_to().and_then(|a| t3::link(&a.address)) {
-                app.note = term::open(&link);
+            if let Some(a) = app.reply_to() {
+                open_in_t3(app, &a.address);
             }
             return;
         }

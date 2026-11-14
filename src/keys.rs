@@ -301,6 +301,7 @@ pub const KEYS: &[Key] = &[
     ),
     k("s", "reply", "reply to the thread in T3; enter sends it, and a busy thread gets it next", &[Reply], Act::Tell),
     k("w", "T3", "open the thread in T3, or copy its link over ssh", &[Reply], Act::Web),
+    k("w", "", "open the selected thread in T3, or copy its link over ssh", &[Side], Act::Web),
     k("x", "stop", "stop the thread's running turn, once you say y", &[Reply], Act::Stop),
     k("q", "back", "back to the board", &[Transcript], Act::Leave),
     k("v", "select", "the conversation in nvim, read-only: visual mode, search, yank to copy", &[Transcript], Act::Select),
