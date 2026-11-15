@@ -18,6 +18,9 @@ use std::process::{Command, Stdio};
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
     pub host: String,
+    /// Where GitLab answers: https://host, or origin's own scheme and port
+    /// when origin is plain http (a GitLab of your own, say).
+    pub base: String,
     pub project: String,
     pub rules: Rules,
     pub slack_token: Option<String>,
@@ -71,14 +74,25 @@ fn parse(config: &str) -> Result<Config, String> {
     let origin = origin.ok_or("ot runs in a git checkout whose origin is a GitLab project")?;
     let (host, project) = remote(&origin)
         .ok_or_else(|| format!("can't read a GitLab project from origin {origin}"))?;
+    let base = base(&origin, &host);
     Ok(Config {
         host,
+        base,
         project,
         rules,
         slack_token,
         linear_key,
         linear_since,
     })
+}
+
+/// GitLab's address for origin: an http one keeps its scheme and port, since
+/// that GitLab answers nowhere else; any other answers at https://host.
+fn base(origin: &str, host: &str) -> String {
+    match origin.strip_prefix("http://").and_then(|rest| rest.split('/').next()) {
+        Some(at) => format!("http://{}", at.rsplit('@').next().unwrap_or(at)),
+        None => format!("https://{host}"),
+    }
 }
 
 /// git@host:group/app.git, ssh://git@host:22/group/app.git and
@@ -110,6 +124,9 @@ mod tests {
         assert_eq!(remote("ssh://git@git.example:2222/team/sub/app.git"), want);
         assert_eq!(remote("https://git.example/team/sub/app.git"), want);
         assert_eq!(remote("https://user@git.example/team/sub/app"), want);
+        assert_eq!(base("https://git.example:8443/team/app.git", "git.example"), "https://git.example");
+        assert_eq!(base("git@git.example:team/app.git", "git.example"), "https://git.example");
+        assert_eq!(base("http://me:pw@localhost:8929/team/app.git", "localhost"), "http://localhost:8929");
         assert_eq!(remote("not a url"), None);
     }
 

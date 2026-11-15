@@ -492,6 +492,107 @@ fn uuid4() -> String {
     format!("{}-{}-{}-{}-{}", &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32])
 }
 
+/// Each `t3` command ot runs, with the flags it passes.
+const COMMANDS: &[(&str, &[&str])] = &[
+    ("thread list", &["--json"]),
+    ("thread show", &["--json", "--messages"]),
+    ("thread start", &["--provider", "--model"]),
+    ("thread send", &[]),
+    ("auth session issue", &["--scope", "--ttl", "--label", "--json"]),
+];
+
+/// What ot reads of T3 that T3 no longer has, in words: tables, columns and payload
+/// fields of its database, its CLI's commands and flags, and fields of what
+/// `t3 thread list|show --json` print. Also whether all of it could be looked at:
+/// the printed fields need T3's server up and a thread to show.
+pub fn drift() -> (Vec<String>, bool) {
+    let Some(bin) = bin() else { return (vec![], true) };
+    let (mut gone, mut whole) = match crate::finder::drift() {
+        Ok(gone) => (gone, true),
+        Err(_) => (vec![], false),
+    };
+    for (command, flags) in COMMANDS {
+        let help = Command::new(&bin).args(command.split(' ')).arg("--help").stdin(Stdio::null()).output();
+        let help = help.map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
+        gone.extend(unknown(command, flags, &help));
+    }
+    let list = call(&["thread", "list", "--json"]);
+    let first = list.as_ref().ok().and_then(|l| l.get(0)).and_then(|t| t["threadId"].as_str()).map(String::from);
+    let show = first.and_then(|id| call(&["thread", "show", &id, "--json", "--messages", "2"]).ok());
+    match (list, show) {
+        (Ok(list), Some(show)) => gone.extend(misshapen(&list, &show)),
+        (Ok(list), None) if !list.is_array() => gone.push("`t3 thread list --json` no longer prints a list".into()),
+        _ => whole = false,
+    }
+    (gone, whole)
+}
+
+/// The `flags` of `t3 <command>` its `help` doesn't name, or the command itself.
+fn unknown(command: &str, flags: &[&str], help: &str) -> Vec<String> {
+    if !help.contains(&format!("t3 {command} ")) {
+        return vec![format!("t3 has no `{command}` any more")];
+    }
+    let named = |flag: &str| help.split(|c: char| c.is_whitespace() || c == ',').any(|w| w == flag);
+    flags.iter().filter(|f| !named(f)).map(|f| format!("`t3 {command}` has no {f} any more")).collect()
+}
+
+/// Fields ot reads that `list` (`t3 thread list --json`) or `show`
+/// (`t3 thread show --json`) lack or hold as something else.
+fn misshapen(list: &Value, show: &Value) -> Vec<String> {
+    let kind = |v: &Value| match v {
+        Value::Null => "null",
+        Value::Bool(_) => "bool",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "list",
+        Value::Object(_) => "object",
+    };
+    // (where, the value there, its field, the kinds ot takes it as)
+    let mut fields: Vec<(&str, &Value, &str, &[&str])> = vec![];
+    let thread = &list[0];
+    for (field, kinds) in [("threadId", &["string"][..]), ("title", &["string"]), ("status", &["string"]), ("updatedAt", &["string"]), ("settled", &["bool"]), ("pullRequests", &["list"]), ("link", &["string", "null"])] {
+        fields.push(("t3 thread list --json", thread, field, kinds));
+    }
+    let shown = &show["thread"];
+    for (field, kinds) in [("pendingRequestCount", &["number"][..]), ("branch", &["string", "null"]), ("worktreePath", &["string", "null"])] {
+        fields.push(("t3 thread show --json", shown, field, kinds));
+    }
+    fields.push(("t3 thread show --json", show, "messages", &["list"]));
+    if let Some(m) = show["messages"].get(0) {
+        fields.push(("t3 thread show --json", m, "role", &["string"]));
+        fields.push(("t3 thread show --json", m, "text", &["string"]));
+    }
+    fields
+        .into_iter()
+        .filter_map(|(at, v, field, kinds)| match v.get(field) {
+            None => Some(format!("`{at}` has no {field} any more")),
+            Some(f) if !kinds.contains(&kind(f)) => Some(format!("`{at}` gives {field} as a {} now", kind(f))),
+            Some(_) => None,
+        })
+        .collect()
+}
+
+/// Checks what ot reads of T3 as ot starts, then again whenever T3 updates (its
+/// database migrates, or its t3 is replaced) and until all of it could be looked at,
+/// telling each time what has drifted.
+pub fn watch_drift(mut tell: impl FnMut(Vec<String>) + Send + 'static) {
+    std::thread::spawn(move || {
+        let mut checked = None;
+        loop {
+            let t3 = bin().and_then(|b| std::fs::metadata(b).and_then(|m| m.modified()).ok());
+            let now = Some((crate::finder::schema(), t3));
+            if now != checked {
+                let (gone, whole) = drift();
+                if whole {
+                    checked = now;
+                }
+                tell(gone);
+            }
+            std::thread::sleep(Duration::from_secs(60));
+        }
+    });
+}
+
 /// What `t3 <args>` prints as JSON, or its reason it couldn't.
 fn call(args: &[&str]) -> Result<Value, String> {
     let bin = bin().ok_or("no t3 here")?;
@@ -510,6 +611,31 @@ fn last_line(stderr: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_flag_or_command_t3_dropped_is_drift() {
+        let help = "USAGE\n  t3 thread show [flags] <thread>\n\nFLAGS\n  --messages integer    How many.\n  --json                Print JSON.\n";
+        assert!(unknown("thread show", &["--json", "--messages"], help).is_empty());
+        assert_eq!(unknown("thread show", &["--json", "--limit"], help), ["`t3 thread show` has no --limit any more"]);
+        assert_eq!(unknown("thread peek", &["--json"], help), ["t3 has no `thread peek` any more"]);
+    }
+
+    #[test]
+    fn a_field_t3_moved_or_retyped_is_drift() {
+        // As t3 0.1.9 prints them, cut to what ot reads.
+        let list = serde_json::json!([{ "threadId": "mcp:eecf9963", "title": "Coupons", "link": null, "status": "failed",
+            "pullRequests": [], "settled": false, "updatedAt": "2026-11-15T19:04:42.088Z" }]);
+        let show = serde_json::json!({ "thread": { "branch": null, "worktreePath": null, "pendingRequestCount": 0 },
+            "messages": [{ "role": "user", "text": "Add coupons" }] });
+        assert!(misshapen(&list, &show).is_empty());
+        let mut moved = show.clone();
+        moved["thread"].as_object_mut().unwrap().remove("pendingRequestCount");
+        moved["thread"]["branch"] = serde_json::json!(7);
+        assert_eq!(
+            misshapen(&list, &moved),
+            ["`t3 thread show --json` has no pendingRequestCount any more", "`t3 thread show --json` gives branch as a number now"]
+        );
+    }
 
     #[test]
     fn thread_ids_are_t3s_and_hc_addresses_are_not() {

@@ -133,6 +133,8 @@ enum Msg {
     Popup(bool),
     /// This machine, read again.
     Stats(stats::Stats),
+    /// What ot reads of T3 that T3 no longer has, checked as ot starts and when T3 updates.
+    Drift(Vec<String>),
     /// How a tour read ahead for `iid` at `head` is coming along.
     Toured { iid: u64, head: String, state: boardui::Toured },
     /// Files dropped on the reply were copied from the Mac (how many), or why not.
@@ -1294,6 +1296,25 @@ impl App {
     }
 }
 
+/// `ot check-t3`: everything ot reads of T3 that T3 no longer has, then out:
+/// 1 when there is some.
+fn check_t3() -> ! {
+    if t3::bin().is_none() {
+        println!("no t3 here, so nothing to check");
+        std::process::exit(0);
+    }
+    let (gone, whole) = t3::drift();
+    for g in &gone {
+        println!("{g}");
+    }
+    if !whole {
+        println!("(T3's database, or its server with a thread to show, wasn't there, so some of it went unchecked)");
+    } else if gone.is_empty() {
+        println!("ot reads nothing T3 has changed");
+    }
+    std::process::exit(if gone.is_empty() { 0 } else { 1 });
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     // `ot thread <id> [name]`: one T3 thread's conversation alone, as the review
@@ -1301,8 +1322,9 @@ fn main() {
     let only = match args.as_slice() {
         [] => None,
         [t, id, rest @ ..] if t == "thread" => Some((id.clone(), rest.join(" "))),
+        [c] if c == "check-t3" => check_t3(),
         _ => {
-            eprintln!("usage: ot\n  run it in a checkout whose origin is a GitLab project\n       ot thread <id> [name]\n  one T3 thread's conversation alone");
+            eprintln!("usage: ot\n  run it in a checkout whose origin is a GitLab project\n       ot thread <id> [name]\n  one T3 thread's conversation alone\n       ot check-t3\n  what ot reads of T3 that T3 no longer has");
             std::process::exit(2);
         }
     };
@@ -1317,7 +1339,7 @@ fn main() {
     };
     let mut snap = cache::load(&cfg.project).unwrap_or_default();
     snap.here = here.join().unwrap_or_default();
-    let gitlab = Shared::new(&cfg.host);
+    let gitlab = Shared::new(&cfg.base);
     let writer: Arc<dyn Writer> = Arc::new(gitlab::Live {
         gitlab: gitlab.clone(),
         project: cfg.project.clone(),
@@ -1398,6 +1420,10 @@ fn run(
         watch_claude(app.tx.clone(), cache::review_tree(&app.cfg.project));
         let tx = app.tx.clone();
         stats::watch(move |st| tx.send(Msg::Stats(st)).is_ok());
+        let tx = app.tx.clone();
+        t3::watch_drift(move |gone| {
+            let _ = tx.send(Msg::Drift(gone));
+        });
         // Read once a run: who works here changes slower than ot restarts.
         if let Some(token) = app.cfg.slack_token.clone() {
             let tx = app.tx.clone();
@@ -1457,6 +1483,12 @@ fn run(
                     }
                 }
                 Msg::Stats(st) => app.stats = Some(st),
+                Msg::Drift(gone) => {
+                    if let Some(first) = gone.first() {
+                        let more = if gone.len() > 1 { format!(" (and {} more)", gone.len() - 1) } else { String::new() };
+                        app.note = Some(format!("T3 changed under ot: {first}{more}; ot check-t3 lists it all"));
+                    }
+                }
                 Msg::Popup(false) => {}
                 Msg::Popup(true) => {
                     if let Some((p, c)) = app.popup.take() {
@@ -2990,13 +3022,14 @@ mod tests {
     fn app(writer: Arc<Recorder>) -> (App, Receiver<Msg>) {
         let cfg = Config {
             host: "git.example".into(),
+            base: "https://git.example".into(),
             project: "team/app".into(),
             rules: fixture::rules(),
             slack_token: None,
             linear_key: None,
             linear_since: None,
         };
-        App::new(cfg, fixture::snapshot(), Shared::new("git.example"), writer)
+        App::new(cfg, fixture::snapshot(), Shared::new("https://git.example"), writer)
     }
 
     /// Keys as typed, then what the writes came to.

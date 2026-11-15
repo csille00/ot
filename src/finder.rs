@@ -169,16 +169,89 @@ fn connect() -> Result<Connection, String> {
     Ok(db)
 }
 
+const THREADS: &str = "SELECT t.thread_id, t.title, COALESCE(p.title, ''), t.updated_at, t.archived_at IS NOT NULL,
+                  COALESCE(json_extract(t.payload_json, '$.branch'), ''),
+                  json_extract(t.payload_json, '$.settledAt') IS NOT NULL
+             FROM orchestration_v2_projection_threads t
+             LEFT JOIN projection_projects p ON p.project_id = t.project_id
+            WHERE t.deleted_at IS NULL
+            ORDER BY t.updated_at DESC";
+
+const SAID: &str = "SELECT role, json_extract(payload_json, '$.text') FROM orchestration_v2_projection_messages
+                     WHERE thread_id = ?1 AND role IN ('user', 'assistant') ORDER BY created_at DESC LIMIT ?2";
+
+const PENDING: &str = "SELECT thread_id, kind, payload_json FROM orchestration_v2_projection_runtime_requests
+                        WHERE status = 'pending' ORDER BY created_at";
+
+const SESSION_THREAD: &str = "SELECT p.thread_id, COALESCE(t.title, '')
+                                FROM orchestration_v2_projection_provider_threads p
+                                LEFT JOIN orchestration_v2_projection_threads t ON t.thread_id = p.thread_id
+                               WHERE json_extract(p.payload_json, '$.nativeThreadRef.nativeId') = ?1
+                                 AND (t.deleted_at IS NULL)
+                               ORDER BY p.updated_at DESC LIMIT 1";
+
+const LAST_MODEL: &str = "SELECT json_extract(payload_json, '$.modelSelection.instanceId'), json_extract(payload_json, '$.modelSelection.model')
+                            FROM orchestration_v2_projection_threads
+                           WHERE deleted_at IS NULL AND json_extract(payload_json, '$.modelSelection.model') IS NOT NULL
+                           ORDER BY created_at DESC LIMIT 1";
+
+const CWD: &str = "SELECT json_extract(t.payload_json, '$.worktreePath'), p.workspace_root
+                     FROM orchestration_v2_projection_threads t
+                     LEFT JOIN projection_projects p ON p.project_id = t.project_id
+                    WHERE t.thread_id = ?1";
+
+const LATEST: &str = "SELECT role = 'user', json_extract(payload_json, '$.text') FROM orchestration_v2_projection_messages
+                       WHERE thread_id = ?1 AND role IN ('user', 'assistant') AND COALESCE(json_extract(payload_json, '$.text'), '') != ''
+                       ORDER BY created_at DESC LIMIT 1";
+
+/// Fields of T3's payloads ot reads that T3 writes into every row (null when unset),
+/// as (table, path): none of a table's newest rows having one means T3 has moved it.
+const FIELDS: &[(&str, &str)] = &[
+    ("orchestration_v2_projection_threads", "$.branch"),
+    ("orchestration_v2_projection_threads", "$.worktreePath"),
+    ("orchestration_v2_projection_threads", "$.modelSelection.instanceId"),
+    ("orchestration_v2_projection_threads", "$.modelSelection.model"),
+    ("orchestration_v2_projection_messages", "$.text"),
+    ("orchestration_v2_projection_provider_threads", "$.nativeThreadRef.nativeId"),
+];
+
+/// What of T3's database ot reads that isn't there any more, in words: each
+/// statement ot runs, prepared (which names every table and column it reads),
+/// and each payload field. Err when there is no database to look at.
+pub fn drift() -> Result<Vec<String>, String> {
+    let db = connect()?;
+    let hits = hits_sql(1);
+    let mut gone: Vec<String> = vec![];
+    for sql in [THREADS, SAID, PENDING, SESSION_THREAD, LAST_MODEL, CWD, LATEST, &hits] {
+        if let Err(e) = db.prepare(sql) {
+            // rusqlite follows SQLite's words with the whole statement.
+            let e = format!("T3's database: {e}");
+            let e = e.split(" in SELECT").next().unwrap_or(&e).to_string();
+            if !gone.contains(&e) {
+                gone.push(e);
+            }
+        }
+    }
+    for (table, path) in FIELDS {
+        let newest = format!(
+            "SELECT COUNT(*) = 0 OR SUM(json_type(payload_json, ?1) IS NOT NULL) > 0
+               FROM (SELECT payload_json FROM {table} ORDER BY rowid DESC LIMIT 50)"
+        );
+        if let Ok(false) = db.query_row(&newest, [path], |r| r.get::<_, bool>(0)) {
+            gone.push(format!("T3's {table} rows no longer have {path}"));
+        }
+    }
+    Ok(gone)
+}
+
+/// The newest migration T3 has run on its database, which moves when T3 updates.
+pub fn schema() -> Option<i64> {
+    connect().ok()?.query_row("SELECT MAX(migration_id) FROM effect_sql_migrations", [], |r| r.get(0)).ok()
+}
+
 /// Every thread T3 still has, newest first.
 fn threads(db: &Connection) -> Result<Vec<Thread>, String> {
-    let sql = "SELECT t.thread_id, t.title, COALESCE(p.title, ''), t.updated_at, t.archived_at IS NOT NULL,
-                      COALESCE(json_extract(t.payload_json, '$.branch'), ''),
-                      json_extract(t.payload_json, '$.settledAt') IS NOT NULL
-                 FROM orchestration_v2_projection_threads t
-                 LEFT JOIN projection_projects p ON p.project_id = t.project_id
-                WHERE t.deleted_at IS NULL
-                ORDER BY t.updated_at DESC";
-    let mut stmt = db.prepare(sql).map_err(|e| format!("T3's database: {e}"))?;
+    let mut stmt = db.prepare(THREADS).map_err(|e| format!("T3's database: {e}"))?;
     let rows = stmt
         .query_map([], |r| {
             let updated: String = r.get(3)?;
@@ -202,16 +275,20 @@ fn message_hits(db: &Connection, terms: &[&str]) -> rusqlite::Result<Vec<(String
     if terms.is_empty() {
         return Ok(vec![]);
     }
+    let mut stmt = db.prepare(&hits_sql(terms.len()))?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(terms.iter()), |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, Option<String>>(2)?.unwrap_or_default())))?;
+    rows.collect()
+}
+
+/// Messages matching `terms` LIKE patterns, ?1 to ?terms.
+fn hits_sql(terms: usize) -> String {
     let text = "json_extract(payload_json, '$.text')";
-    let wheres: Vec<String> = (1..=terms.len()).map(|i| format!("{text} LIKE ?{i} ESCAPE '\\'")).collect();
-    let sql = format!(
+    let wheres: Vec<String> = (1..=terms).map(|i| format!("{text} LIKE ?{i} ESCAPE '\\'")).collect();
+    format!(
         "SELECT thread_id, role = 'user', {text} FROM orchestration_v2_projection_messages
           WHERE role IN ('user', 'assistant') AND {} ORDER BY created_at DESC LIMIT {HITS}",
         wheres.join(" AND ")
-    );
-    let mut stmt = db.prepare(&sql)?;
-    let rows = stmt.query_map(rusqlite::params_from_iter(terms.iter()), |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, Option<String>>(2)?.unwrap_or_default())))?;
-    rows.collect()
+    )
 }
 
 fn like_escape(s: &str) -> String {
@@ -220,10 +297,7 @@ fn like_escape(s: &str) -> String {
 
 /// The thread's newest messages, oldest of them first.
 fn said(db: &Connection, id: &str) -> rusqlite::Result<Vec<Said>> {
-    let mut stmt = db.prepare(
-        "SELECT role, json_extract(payload_json, '$.text') FROM orchestration_v2_projection_messages
-          WHERE thread_id = ?1 AND role IN ('user', 'assistant') ORDER BY created_at DESC LIMIT ?2",
-    )?;
+    let mut stmt = db.prepare(SAID)?;
     let rows = stmt.query_map(rusqlite::params![id, PREVIEW as i64], |r| {
         Ok(Said { you: r.get::<_, String>(0)? == "user", text: r.get::<_, Option<String>>(1)?.unwrap_or_default().trim().to_string() })
     })?;
@@ -239,10 +313,7 @@ fn said(db: &Connection, id: &str) -> rusqlite::Result<Vec<Said>> {
 pub fn pending() -> HashMap<String, Vec<String>> {
     let mut out: HashMap<String, Vec<String>> = HashMap::new();
     let Ok(db) = connect() else { return out };
-    let Ok(mut stmt) = db.prepare(
-        "SELECT thread_id, kind, payload_json FROM orchestration_v2_projection_runtime_requests
-          WHERE status = 'pending' ORDER BY created_at",
-    ) else {
+    let Ok(mut stmt) = db.prepare(PENDING) else {
         return out;
     };
     let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)));
@@ -291,12 +362,7 @@ fn find<'a>(v: &'a serde_json::Value, key: &str) -> Option<&'a serde_json::Value
 pub fn thread_of_session(session: &str) -> Option<(String, String)> {
     let db = connect().ok()?;
     db.query_row(
-        "SELECT p.thread_id, COALESCE(t.title, '')
-           FROM orchestration_v2_projection_provider_threads p
-           LEFT JOIN orchestration_v2_projection_threads t ON t.thread_id = p.thread_id
-          WHERE json_extract(p.payload_json, '$.nativeThreadRef.nativeId') = ?1
-            AND (t.deleted_at IS NULL)
-          ORDER BY p.updated_at DESC LIMIT 1",
+        SESSION_THREAD,
         [session],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )
@@ -309,10 +375,7 @@ pub fn conversation(id: &str, most: usize) -> Result<Vec<crate::claude::Turn>, S
     use crate::claude::{Turn, Who};
     let db = connect()?;
     let mut stmt = db
-        .prepare(
-            "SELECT role, json_extract(payload_json, '$.text') FROM orchestration_v2_projection_messages
-              WHERE thread_id = ?1 AND role IN ('user', 'assistant') ORDER BY created_at DESC LIMIT ?2",
-        )
+        .prepare(SAID)
         .map_err(|e| format!("T3's database: {e}"))?;
     let rows = stmt
         .query_map(rusqlite::params![id, most as i64], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?.unwrap_or_default())))
@@ -330,10 +393,7 @@ pub fn conversation(id: &str, most: usize) -> Result<Vec<crate::claude::Turn>, S
 pub fn last_model() -> Option<(String, String)> {
     let db = connect().ok()?;
     db.query_row(
-        "SELECT json_extract(payload_json, '$.modelSelection.instanceId'), json_extract(payload_json, '$.modelSelection.model')
-           FROM orchestration_v2_projection_threads
-          WHERE deleted_at IS NULL AND json_extract(payload_json, '$.modelSelection.model') IS NOT NULL
-          ORDER BY created_at DESC LIMIT 1",
+        LAST_MODEL,
         [],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )
@@ -345,10 +405,7 @@ pub fn cwd(id: &str) -> Option<std::path::PathBuf> {
     let db = connect().ok()?;
     let (tree, root): (Option<String>, Option<String>) = db
         .query_row(
-            "SELECT json_extract(t.payload_json, '$.worktreePath'), p.workspace_root
-               FROM orchestration_v2_projection_threads t
-               LEFT JOIN projection_projects p ON p.project_id = t.project_id
-              WHERE t.thread_id = ?1",
+            CWD,
             [id],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
@@ -359,11 +416,7 @@ pub fn cwd(id: &str) -> Option<std::path::PathBuf> {
 /// The last thing said in each of `ids`, by you or not, read straight from T3's database.
 pub fn latest(ids: &[&str]) -> HashMap<String, (bool, String)> {
     let Ok(db) = connect() else { return HashMap::new() };
-    let Ok(mut stmt) = db.prepare(
-        "SELECT role = 'user', json_extract(payload_json, '$.text') FROM orchestration_v2_projection_messages
-          WHERE thread_id = ?1 AND role IN ('user', 'assistant') AND COALESCE(json_extract(payload_json, '$.text'), '') != ''
-          ORDER BY created_at DESC LIMIT 1",
-    ) else {
+    let Ok(mut stmt) = db.prepare(LATEST) else {
         return HashMap::new();
     };
     ids.iter()
