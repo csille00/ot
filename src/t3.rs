@@ -591,8 +591,10 @@ pub fn watch_drift(mut tell: impl FnMut(Vec<String>) + Send + 'static) {
     std::thread::spawn(move || {
         let mut checked = None;
         loop {
-            let t3 = bin().and_then(|b| std::fs::metadata(b).and_then(|m| m.modified()).ok());
-            let now = Some((crate::finder::schema(), t3));
+            let changed = |p: PathBuf| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+            // The service switching versions rewrites its state, though no t3 is replaced.
+            let service = home().and_then(|h| changed(h.join("runtime/service-state.json")));
+            let now = Some((crate::finder::schema(), bin().and_then(changed), service));
             if now != checked {
                 let (gone, whole) = drift();
                 if whole {
