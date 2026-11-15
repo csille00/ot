@@ -1296,6 +1296,9 @@ impl App {
     }
 }
 
+/// How the board's note starts when T3 has drifted, so it clears once T3 is back.
+const DRIFTED: &str = "T3 changed under ot: ";
+
 /// `ot check-t3`: everything ot reads of T3 that T3 no longer has, then out:
 /// 1 when there is some.
 fn check_t3() -> ! {
@@ -1486,7 +1489,9 @@ fn run(
                 Msg::Drift(gone) => {
                     if let Some(first) = gone.first() {
                         let more = if gone.len() > 1 { format!(" (and {} more)", gone.len() - 1) } else { String::new() };
-                        app.note = Some(format!("T3 changed under ot: {first}{more}; ot check-t3 lists it all"));
+                        app.note = Some(format!("{DRIFTED}{first}{more}; ot check-t3 lists it all"));
+                    } else if app.note.as_deref().is_some_and(|n| n.starts_with(DRIFTED)) {
+                        app.note = None;
                     }
                 }
                 Msg::Popup(false) => {}
