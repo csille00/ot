@@ -18,14 +18,15 @@ use std::time::Duration;
 /// finding the token runs glab, which is worth doing once.
 #[derive(Clone)]
 pub struct Shared {
-    host: String,
+    base: String,
     made: Arc<Mutex<Option<GitLab>>>,
 }
 
 impl Shared {
-    pub fn new(host: &str) -> Shared {
+    /// `base` is where GitLab answers, such as https://gitlab.com.
+    pub fn new(base: &str) -> Shared {
         Shared {
-            host: host.to_string(),
+            base: base.to_string(),
             made: Arc::default(),
         }
     }
@@ -35,7 +36,7 @@ impl Shared {
         if let Some(g) = made.as_ref() {
             return Ok(g.clone());
         }
-        let g = GitLab::connect(&self.host)?;
+        let g = GitLab::connect(&self.base)?;
         *made = Some(g.clone());
         Ok(g)
     }
@@ -45,6 +46,7 @@ impl Shared {
 pub struct GitLab {
     agent: ureq::Agent,
     host: String,
+    base: String,
     /// One cell for every clone, so a token renewed by one thread serves all.
     token: Arc<Mutex<String>>,
     /// Each MR's base and start, by iid and head, as REST gave them.
@@ -74,7 +76,8 @@ fn token(host: &str) -> Result<String, String> {
 type Sent = Result<ureq::http::Response<ureq::Body>, ureq::Error>;
 
 impl GitLab {
-    fn connect(host: &str) -> Result<GitLab, String> {
+    fn connect(base: &str) -> Result<GitLab, String> {
+        let host = base.split_once("://").map_or(base, |(_, h)| h);
         let agent = ureq::Agent::config_builder()
             .timeout_global(Some(Duration::from_secs(30)))
             .build()
@@ -82,6 +85,7 @@ impl GitLab {
         Ok(GitLab {
             agent,
             host: host.to_string(),
+            base: base.to_string(),
             token: Arc::new(Mutex::new(token(host)?)),
             refs: Arc::default(),
         })
@@ -142,7 +146,7 @@ impl GitLab {
         query: &str,
         variables: serde_json::Value,
     ) -> Result<T, String> {
-        let url = format!("https://{}/api/graphql", self.host);
+        let url = format!("{}/api/graphql", self.base);
         let body = json!({ "query": query, "variables": variables });
         let mut resp =
             self.send(|auth| self.agent.post(&url).header("Authorization", auth).send_json(&body))?;
@@ -165,7 +169,7 @@ impl GitLab {
         path: &str,
         body: &serde_json::Value,
     ) -> Result<serde_json::Value, String> {
-        let url = format!("https://{}/api/v4{path}", self.host);
+        let url = format!("{}/api/v4{path}", self.base);
         let mut resp = self.send(|auth| match method {
             Method::Get => self.agent.get(&url).header("Authorization", auth).call(),
             Method::Delete => self.agent.delete(&url).header("Authorization", auth).call(),
@@ -338,7 +342,7 @@ impl GitLab {
     /// project too. Read whole, past ureq's 10MB cap on a body: a screen
     /// recording can be bigger.
     pub fn upload(&self, project: &str, path: &str) -> Result<Vec<u8>, String> {
-        let url = format!("https://{}/api/v4{}{path}", self.host, write::project_path(project));
+        let url = format!("{}/api/v4{}{path}", self.base, write::project_path(project));
         let mut resp = self.send(|auth| self.agent.get(&url).header("Authorization", auth).call())?;
         let mut bytes = vec![];
         resp.body_mut()
