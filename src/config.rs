@@ -86,12 +86,14 @@ fn parse(config: &str) -> Result<Config, String> {
     })
 }
 
-/// GitLab's address for origin: an http one keeps its scheme and port, since
-/// that GitLab answers nowhere else; any other answers at https://host.
+/// GitLab's address for origin: https://host, except a plain-http origin on this
+/// machine (a GitLab of your own) keeps its scheme and port. Elsewhere the token
+/// would cross the network in the clear.
 fn base(origin: &str, host: &str) -> String {
+    let local = matches!(host, "localhost" | "::1" | "[::1]") || host.starts_with("127.");
     match origin.strip_prefix("http://").and_then(|rest| rest.split('/').next()) {
-        Some(at) => format!("http://{}", at.rsplit('@').next().unwrap_or(at)),
-        None => format!("https://{host}"),
+        Some(at) if local => format!("http://{}", at.rsplit('@').next().unwrap_or(at)),
+        _ => format!("https://{host}"),
     }
 }
 
@@ -127,6 +129,7 @@ mod tests {
         assert_eq!(base("https://git.example:8443/team/app.git", "git.example"), "https://git.example");
         assert_eq!(base("git@git.example:team/app.git", "git.example"), "https://git.example");
         assert_eq!(base("http://me:pw@localhost:8929/team/app.git", "localhost"), "http://localhost:8929");
+        assert_eq!(base("http://git.example/team/app.git", "git.example"), "https://git.example");
         assert_eq!(remote("not a url"), None);
     }
 
