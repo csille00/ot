@@ -90,7 +90,7 @@ fn parse(config: &str) -> Result<Config, String> {
 /// machine (a GitLab of your own) keeps its scheme and port. Elsewhere the token
 /// would cross the network in the clear.
 fn base(origin: &str, host: &str) -> String {
-    let local = matches!(host, "localhost" | "::1" | "[::1]") || host.starts_with("127.");
+    let local = host == "localhost" || host.starts_with("127.");
     match origin.strip_prefix("http://").and_then(|rest| rest.split('/').next()) {
         Some(at) if local => format!("http://{}", at.rsplit('@').next().unwrap_or(at)),
         _ => format!("https://{host}"),
