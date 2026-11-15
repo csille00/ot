@@ -519,9 +519,12 @@ pub fn drift() -> (Vec<String>, bool) {
     let list = call(&["thread", "list", "--json"]);
     let first = list.as_ref().ok().and_then(|l| l.get(0)).and_then(|t| t["threadId"].as_str()).map(String::from);
     let show = first.and_then(|id| call(&["thread", "show", &id, "--json", "--messages", "2"]).ok());
-    match (list, show) {
-        (Ok(list), Some(show)) => gone.extend(misshapen(&list, &show)),
-        (Ok(list), None) if !list.is_array() => gone.push("`t3 thread list --json` no longer prints a list".into()),
+    match list {
+        Ok(list) if !list.is_array() => gone.push("`t3 thread list --json` no longer prints a list".into()),
+        Ok(list) if list.get(0).is_some() => {
+            gone.extend(misshapen(&list, show.as_ref()));
+            whole &= show.is_some();
+        }
         _ => whole = false,
     }
     (gone, whole)
@@ -537,8 +540,9 @@ fn unknown(command: &str, flags: &[&str], help: &str) -> Vec<String> {
 }
 
 /// Fields ot reads that `list` (`t3 thread list --json`) or `show`
-/// (`t3 thread show --json`) lack or hold as something else.
-fn misshapen(list: &Value, show: &Value) -> Vec<String> {
+/// (`t3 thread show --json`, when there was a thread to show) lack or hold as
+/// something else.
+fn misshapen(list: &Value, show: Option<&Value>) -> Vec<String> {
     let kind = |v: &Value| match v {
         Value::Null => "null",
         Value::Bool(_) => "bool",
@@ -553,14 +557,22 @@ fn misshapen(list: &Value, show: &Value) -> Vec<String> {
     for (field, kinds) in [("threadId", &["string"][..]), ("title", &["string"]), ("status", &["string"]), ("updatedAt", &["string"]), ("settled", &["bool"]), ("pullRequests", &["list"]), ("link", &["string", "null"])] {
         fields.push(("t3 thread list --json", thread, field, kinds));
     }
-    let shown = &show["thread"];
-    for (field, kinds) in [("pendingRequestCount", &["number"][..]), ("branch", &["string", "null"]), ("worktreePath", &["string", "null"])] {
-        fields.push(("t3 thread show --json", shown, field, kinds));
+    let threads = list.as_array().into_iter().flatten();
+    if let Some(pr) = threads.filter_map(|t| t["pullRequests"].get(0)).next() {
+        for (field, kinds) in [("state", &["string"][..]), ("repository", &["string"]), ("number", &["number"])] {
+            fields.push(("t3 thread list --json pullRequests[]", pr, field, kinds));
+        }
     }
-    fields.push(("t3 thread show --json", show, "messages", &["list"]));
-    if let Some(m) = show["messages"].get(0) {
-        fields.push(("t3 thread show --json", m, "role", &["string"]));
-        fields.push(("t3 thread show --json", m, "text", &["string"]));
+    if let Some(show) = show {
+        let shown = &show["thread"];
+        for (field, kinds) in [("pendingRequestCount", &["number"][..]), ("branch", &["string", "null"]), ("worktreePath", &["string", "null"])] {
+            fields.push(("t3 thread show --json", shown, field, kinds));
+        }
+        fields.push(("t3 thread show --json", show, "messages", &["list"]));
+        if let Some(m) = show["messages"].get(0) {
+            fields.push(("t3 thread show --json", m, "role", &["string"]));
+            fields.push(("t3 thread show --json", m, "text", &["string"]));
+        }
     }
     fields
         .into_iter()
@@ -627,14 +639,21 @@ mod tests {
             "pullRequests": [], "settled": false, "updatedAt": "2026-11-15T19:04:42.088Z" }]);
         let show = serde_json::json!({ "thread": { "branch": null, "worktreePath": null, "pendingRequestCount": 0 },
             "messages": [{ "role": "user", "text": "Add coupons" }] });
-        assert!(misshapen(&list, &show).is_empty());
+        assert!(misshapen(&list, Some(&show)).is_empty());
         let mut moved = show.clone();
         moved["thread"].as_object_mut().unwrap().remove("pendingRequestCount");
         moved["thread"]["branch"] = serde_json::json!(7);
         assert_eq!(
-            misshapen(&list, &moved),
+            misshapen(&list, Some(&moved)),
             ["`t3 thread show --json` has no pendingRequestCount any more", "`t3 thread show --json` gives branch as a number now"]
         );
+        // Without a threadId there is no thread to show, and that is drift too.
+        let mut renamed = list.clone();
+        renamed[0]["id"] = renamed[0].as_object_mut().unwrap().remove("threadId").unwrap();
+        assert_eq!(misshapen(&renamed, None), ["`t3 thread list --json` has no threadId any more"]);
+        let mut pr = list.clone();
+        pr[0]["pullRequests"] = serde_json::json!([{ "state": "open", "repository": "acme/storefront", "iid": 4 }]);
+        assert_eq!(misshapen(&pr, Some(&show)), ["`t3 thread list --json pullRequests[]` has no number any more"]);
     }
 
     #[test]
