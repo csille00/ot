@@ -78,8 +78,12 @@ impl Day {
     /// when it has none yet and there are some.
     pub fn read(root: &Path, date: Date) -> Day {
         let path = day_path(root, date);
-        if let Ok(text) = fs::read_to_string(&path) {
-            return Day::of(path, date, &text);
+        // Only a day with no file starts from the last; one ot can't read is
+        // left as it is.
+        match fs::read(&path) {
+            Ok(bytes) => return Day::of(path, date, &String::from_utf8_lossy(&bytes)),
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Day::of(path, date, ""),
+            Err(_) => {}
         }
         let mut day = Day::of(path, date, "");
         if let Some((was, last)) = last_before(root, date) {
