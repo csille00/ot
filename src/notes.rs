@@ -35,6 +35,8 @@ pub struct Day {
     pub path: PathBuf,
     lines: Vec<String>,
     pub todos: Vec<Todo>,
+    /// The file is there but isn't text ot can write back as it was.
+    locked: bool,
 }
 
 const FROM: &str = "<!-- from ";
@@ -71,7 +73,7 @@ impl Day {
     fn of(path: PathBuf, date: Date, text: &str) -> Day {
         let lines: Vec<String> = text.lines().map(str::to_string).collect();
         let todos = lines.iter().enumerate().filter_map(|(i, l)| parse(l, i)).collect();
-        Day { date: Some(date), path, lines, todos }
+        Day { date: Some(date), path, lines, todos, locked: false }
     }
 
     /// The day's list, its file started from the last day's unchecked boxes
@@ -81,8 +83,13 @@ impl Day {
         // Only a day with no file starts from the last; one ot can't read is
         // left as it is.
         match fs::read(&path) {
-            Ok(bytes) => return Day::of(path, date, &String::from_utf8_lossy(&bytes)),
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Day::of(path, date, ""),
+            Ok(bytes) => {
+                let locked = std::str::from_utf8(&bytes).is_err();
+                return Day { locked, ..Day::of(path, date, &String::from_utf8_lossy(&bytes)) };
+            }
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                return Day { locked: true, ..Day::of(path, date, "") };
+            }
             Err(_) => {}
         }
         let mut day = Day::of(path, date, "");
@@ -103,6 +110,9 @@ impl Day {
     }
 
     fn save(&self) -> Result<(), String> {
+        if self.locked {
+            return Err(format!("{} isn't UTF-8 text; ot leaves it to you (e opens it)", self.path.display()));
+        }
         if let Some(d) = self.path.parent() {
             fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
         }
@@ -298,6 +308,11 @@ mod tests {
             ]
         );
         assert!(fs::read_to_string(r.join("todo/2026-11-15.md")).unwrap().starts_with("# Sunday, November 15\n"));
+        // A day ot can't write back as it was is left alone.
+        fs::write(r.join("todo/2026-11-17.md"), b"- [ ] caf\xe9\n").unwrap();
+        let mut d = Day::read(&r, date("2026-11-17"));
+        assert!(d.toggle(0).is_err() && d.add("more").is_err());
+        assert_eq!(fs::read(r.join("todo/2026-11-17.md")).unwrap(), b"- [ ] caf\xe9\n");
         // A day already written isn't started again.
         fs::write(r.join("todo/2026-11-16.md"), "- [ ] only this\n").unwrap();
         assert_eq!(Day::read(&r, date("2026-11-16")).todos.len(), 1);
