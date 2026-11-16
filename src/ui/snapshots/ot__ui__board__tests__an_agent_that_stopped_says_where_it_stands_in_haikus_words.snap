@@ -45,4 +45,4 @@ expression: "frame_of(fixture::swarm(), &HashMap::new(), 110, 44, |_, v|\n{ v.at
   ●━━━━━━━━━●─────────○─────────○─────────○─────────○
   ticket    agent     draft     review    merged    live
  ────────────────────────────────────────────────────────────────────────────────────────────────────────────
-  y link  w web  t agent                                                                               ? keys
+  y link  w web  t agent  tab your day                                                                 ? keys

@@ -19,6 +19,7 @@ mod keys;
 mod land;
 mod linear;
 mod model;
+mod notes;
 mod music;
 mod nvim;
 mod popup;
@@ -327,6 +328,13 @@ struct App {
     patches: HashMap<u64, (String, Result<String, String>)>,
     /// A reply being written in nvim, in a box over ot that has every key.
     popup: Option<(popup::Popup, compose::Compose)>,
+    /// Today's TODOs and your notes, as last read, and the pane they show in.
+    day: notes::Day,
+    notes: Vec<notes::Note>,
+    day_view: ui::day::View,
+    /// What a typed answer asks of the loop (answer() returns nothing): nvim on
+    /// the note just named.
+    next: Option<Next>,
 }
 
 /// The MR panel beside a thread: hidden by m, and where its diff is.
@@ -415,7 +423,12 @@ impl App {
             said: HashMap::new(),
             patches: HashMap::new(),
             popup: None,
+            day: notes::Day::default(),
+            notes: vec![],
+            day_view: ui::day::View::default(),
+            next: None,
         };
+        app.reload_day();
         app.rebuild();
         app.view.top(&app.board);
         (app, rx)
@@ -521,7 +534,12 @@ impl App {
                 }
                 Some(("session", at))
             }
-            Shown::Board => matches!(self.view.mode, Mode::Board).then(|| ("board", self.view.places(&self.snap, &self.board))),
+            Shown::Board if !matches!(self.view.mode, Mode::Board) => None,
+            Shown::Board => Some(match self.day_view.focus {
+                Some(ui::day::Part::Todos) => ("todos", vec![keys::Place::Todos]),
+                Some(ui::day::Part::Notes) => ("notes", vec![keys::Place::Notes]),
+                None => ("board", self.view.places(&self.snap, &self.board)),
+            }),
         }
     }
 
@@ -578,6 +596,7 @@ impl App {
                     }
                 }
                 self.rebuild();
+                self.reload_day();
                 // Only on an answer from after every write landed.
                 if !again {
                     self.land();
@@ -1268,6 +1287,22 @@ impl App {
         (self.side.cursor.is_some() || !self.side.hidden && w >= ui::side::FROM) && self.agents.iter().any(|a| t3::owns(&a.address))
     }
 
+    /// Today's TODOs and the notes, read again: after nvim, on each answer from
+    /// GitLab (which also turns the day over at midnight), on each key there.
+    fn reload_day(&mut self) {
+        let root = notes::dir();
+        self.day = notes::Day::read(&root, jiff::Zoned::now().date());
+        self.notes = notes::notes(&root);
+        let v = &mut self.day_view;
+        v.todo_at = v.todo_at.min(self.day.todos.len().saturating_sub(1));
+        v.note_at = v.note_at.min(self.notes.len().saturating_sub(1));
+    }
+
+    /// Whether your day is drawn at the board's right, `w` columns wide.
+    fn day_shows(&self, w: usize) -> bool {
+        !self.day_view.hidden && w >= ui::day::FROM as usize
+    }
+
     /// Reads the thread shown again, off the UI thread.
     fn load_thread(&self) {
         if let Shown::Thread { agent, .. } = &self.shown {
@@ -1612,6 +1647,7 @@ fn run(
                             if let Err(e) = lend_terminal(term, &lend, nvim) {
                                 app.note = Some(e);
                             }
+                            app.reload_day();
                         }
                         Next::Shell(dir) => {
                             let mut sh = Command::new(std::env::var_os("SHELL").unwrap_or_else(|| "bash".into()));
@@ -1671,7 +1707,7 @@ fn key(app: &mut App, name: &str) -> Next {
             Shown::Music(_) => search_typed(app, name),
             _ => answer(app, name),
         }
-        return Next::Stay;
+        return app.next.take().unwrap_or(Next::Stay);
     };
     let Some(act) = keys::act(name, &places) else {
         // s where there is nobody to reply to: say why, rather than nothing.
@@ -1695,6 +1731,7 @@ fn key(app: &mut App, name: &str) -> Next {
             }
         }
         Shown::Session { .. } | Shown::Thread { .. } => session_act(app, act),
+        Shown::Board if app.day_view.focus.is_some() => return day_act(app, act),
         Shown::Board => return board_act(app, act),
     }
     Next::Stay
@@ -1856,7 +1893,7 @@ fn pasted(app: &mut App, text: &str) {
             musicui::Search::Typing(typed) => typed,
             _ => return,
         },
-        (_, Mode::Tell { text, .. } | Mode::Rename { text, .. } | Mode::NewThread(text)) => text,
+        (_, Mode::Tell { text, .. } | Mode::Rename { text, .. } | Mode::NewThread(text) | Mode::Todo(text) | Mode::NoteTitle(text)) => text,
         (Shown::Board, Mode::Note { text, .. } | Mode::Message(_, text)) => text,
         (Shown::Board, Mode::Typing(t)) => {
             t.cycling = None;
@@ -2298,6 +2335,31 @@ fn answer(app: &mut App, name: &str) {
                 }
             }
         }
+        Mode::Todo(mut text) => match name {
+            "esc" => {}
+            "enter" => {
+                if let Err(e) = app.day.add(&text) {
+                    app.note = Some(format!("can't add it: {e}"));
+                }
+                app.day_view.todo_at = app.day.shown().iter().filter(|t| !t.done).count().saturating_sub(1);
+            }
+            _ => {
+                keys::edit(&mut text, name);
+                app.view.mode = Mode::Todo(text);
+            }
+        },
+        Mode::NoteTitle(mut text) => match name {
+            "esc" => {}
+            "enter" if text.trim().is_empty() => app.view.mode = Mode::NoteTitle(text),
+            "enter" => match notes::create(&notes::dir(), &text) {
+                Ok(path) => app.next = Some(Next::Nvim(notes::nvim_args(&path))),
+                Err(e) => app.note = Some(format!("can't start the note: {e}")),
+            },
+            _ => {
+                keys::edit(&mut text, name);
+                app.view.mode = Mode::NoteTitle(text);
+            }
+        },
         Mode::NewThread(mut text) => {
             match name {
                 "esc" => {}
@@ -2336,10 +2398,72 @@ fn answer(app: &mut App, name: &str) {
     }
 }
 
+/// The keys in your day at the board's right.
+fn day_act(app: &mut App, act: Act) -> Next {
+    use ui::day::Part;
+    app.reload_day();
+    let v = &mut app.day_view;
+    let todos = app.day.todos.len();
+    let at = match v.focus {
+        Some(Part::Todos) => (&mut v.todo_at, todos),
+        _ => (&mut v.note_at, app.notes.len()),
+    };
+    match act {
+        Act::Down => *at.0 = (*at.0 + 1).min(at.1.saturating_sub(1)),
+        Act::Up => *at.0 = at.0.saturating_sub(1),
+        Act::Day => {
+            v.focus = match v.focus {
+                Some(Part::Todos) => Some(Part::Notes),
+                _ => None,
+            }
+        }
+        Act::Back => v.focus = None,
+        Act::DayPane => {
+            v.hidden = true;
+            v.focus = None;
+        }
+        Act::Check => {
+            if let Err(e) = app.day.toggle(v.todo_at) {
+                app.note = Some(format!("can't check it: {e}"));
+            }
+        }
+        Act::AddTodo => app.view.mode = Mode::Todo(String::new()),
+        Act::NewNote => app.view.mode = Mode::NoteTitle(String::new()),
+        Act::EditDay => match app.day.file() {
+            Ok(path) => return Next::Nvim(notes::nvim_args(&path)),
+            Err(e) => app.note = Some(format!("can't open today's list: {e}")),
+        },
+        Act::Open => {
+            if let Some(n) = app.notes.get(v.note_at) {
+                return Next::Nvim(notes::nvim_args(&n.path));
+            }
+        }
+        _ => {}
+    }
+    Next::Stay
+}
+
 /// The board's keys on the row the cursor is on.
 fn board_act(app: &mut App, act: Act) -> Next {
     let b = &app.board;
     match act {
+        Act::Day if !app.day_shows(app.width) => {
+            app.note = Some(if app.day_view.hidden {
+                "your TODOs and notes are hidden; D shows them".into()
+            } else {
+                format!("your TODOs and notes show at the right from {} columns wide", ui::day::FROM)
+            });
+        }
+        Act::Day => {
+            app.reload_day();
+            app.day_view.focus = Some(ui::day::Part::Todos);
+        }
+        Act::DayPane => {
+            app.day_view.hidden = !app.day_view.hidden;
+            if !app.day_view.hidden && !app.day_shows(app.width) {
+                app.note = Some(format!("your TODOs and notes show at the right from {} columns wide", ui::day::FROM));
+            }
+        }
         Act::Down => app.view.step(b, 1),
         Act::Up => app.view.step(b, -1),
         Act::Top => app.view.top(b),
@@ -2873,7 +2997,17 @@ fn draw(term: &mut ratatui::DefaultTerminal, app: &mut App) -> std::io::Result<(
     let landing = land::said(&app.landings, &app.snap, &app.cfg.rules);
     app.width = term.size().map_or(app.width, |s| s.width as usize);
     let statuses = statuses(&app.agents);
+    let day_shows = app.day_shows(app.width);
+    let away = places_now(&app.places());
+    let today = jiff::Zoned::now().date();
     term.draw(|f| {
+        let mut area = f.area();
+        if day_shows {
+            let w = ui::day::cols(area.width);
+            let at = ratatui::layout::Rect { x: area.right() - w, width: w, ..area };
+            ui::day::draw(f, at, &app.day, &app.notes, &app.day_view, today, jiff::Timestamp::now().as_second());
+            area.width -= w;
+        }
         let s = boardui::Screen {
             snap: &app.snap,
             board: &app.board,
@@ -2892,8 +3026,9 @@ fn draw(term: &mut ratatui::DefaultTerminal, app: &mut App) -> std::io::Result<(
             hills: &app.hills,
             tours: &app.tours,
             stats: app.stats.as_ref(),
+            away: app.day_view.focus.is_some().then_some(away.as_slice()),
         };
-        boardui::draw(f, &s, &mut app.view);
+        boardui::draw_in(f, area, &s, &mut app.view);
         if let Mode::Blurb { iid, text, scroll } = &mut app.view.mode {
             if let Some(m) = app.snap.mrs.iter().find(|m| m.iid == *iid) {
                 ui::blurb::draw(f, m, text.as_ref(), scroll);

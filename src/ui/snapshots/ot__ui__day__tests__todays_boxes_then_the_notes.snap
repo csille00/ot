@@ -1,0 +1,18 @@
+---
+source: src/ui/day.rs
+expression: "crate::ui::text(&t)"
+---
+│ Today  Sun Nov 15                         1/4
+│ [ ] rebase cart-ui on main
+│▌[ ] ask bob about the login copy          sat
+│ [ ] a box from long ago                oct 30
+│ [x] reply to alice on !6
+│
+├──────────────────────────────────────────────
+│ Notes                                       2
+│ coupon edge cases                          2h
+│ rate-limit numbers                         1d
+│
+│
+│
+│

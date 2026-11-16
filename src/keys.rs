@@ -118,6 +118,17 @@ pub enum Act {
     Leave,
     Help,
     Quit,
+    /// Your TODOs and notes at the board's right: into them and round, shown or
+    /// not, and back to the board.
+    Day,
+    DayPane,
+    Back,
+    /// Check a TODO off, add one, or edit the day's list in nvim.
+    Check,
+    AddTodo,
+    EditDay,
+    /// A new note.
+    NewNote,
 }
 
 /// Where the cursor is, which decides the keys that work. A row can be in
@@ -184,6 +195,10 @@ pub enum Place {
     Selection,
     /// On the page of Claude's tour.
     Tour,
+    /// In today's TODOs at the board's right.
+    Todos,
+    /// In your notes, under them.
+    Notes,
 }
 
 /// Every place on the board, for its help screen.
@@ -206,6 +221,8 @@ pub const BOARD: &[Place] = &[
     Place::HcWorking,
     Place::FoldShut,
     Place::FoldOpen,
+    Place::Todos,
+    Place::Notes,
 ];
 
 /// Every place in nvim's review, for the plugin.
@@ -581,6 +598,17 @@ pub const KEYS: &[Key] = &[
     ),
     k("w", "web", "open the MR in the browser", &[Mr, List], Act::Web),
     k("w", "web", "open the ticket in Linear", &[Ticket], Act::Web),
+    k("tab", "your day", "into your TODOs and notes at the right; tab goes on to the notes, then back", &[Board], Act::Day),
+    k("D", "", "show or hide your TODOs and notes at the right", &[Board, Todos, Notes], Act::DayPane),
+    k("j", "", "next", &[Todos, Notes], Act::Down),
+    k("k", "", "previous", &[Todos, Notes], Act::Up),
+    k("space", "check", "check it off, or uncheck it", &[Todos], Act::Check),
+    k("a", "add", "add a TODO for today", &[Todos], Act::AddTodo),
+    k("e", "edit", "today's list in nvim, as markdown", &[Todos], Act::EditDay),
+    k("enter", "open", "the note in nvim, its markdown drawn as you type", &[Notes], Act::Open),
+    k("n", "new note", "a new note: say its title, then write it in nvim", &[Todos, Notes], Act::NewNote),
+    k("tab", "next", "on to the notes, then back to the board", &[Todos, Notes], Act::Day),
+    k("esc", "board", "back to the board", &[Todos, Notes], Act::Back),
     k(
         "u",
         "",
