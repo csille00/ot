@@ -640,7 +640,7 @@ impl Cols {
         let rows = || b.tree.iter().chain(&b.claude).chain(&b.not_sent);
         let widest = |f: &dyn Fn(&Row) -> usize| rows().map(f).max().unwrap_or(0);
         let move_w = widest(&|r| match &r.item {
-            Item::Mr { mv, agent, .. } => width(&mv.word()).max(agent.as_ref().map_or(0, |_| width(WORKING))),
+            Item::Mr { .. } => 0,
             Item::Ticket { .. } => width(&ticket_move(&r.item).2),
             Item::Here(_) => width(HERE),
             Item::Claude { state, .. } => width(state.word()),
@@ -659,12 +659,11 @@ impl Cols {
             _ => 0,
         });
         let text_end = widest(&|r| match &r.item {
-            Item::Mr { branch: t, .. }
-            | Item::Ticket { title: t, .. }
+            Item::Ticket { title: t, .. }
             | Item::Here(t)
             | Item::Claude { title: t, .. }
             | Item::Hc { name: t, .. } => text_x(r) + width(t),
-            Item::Label(_) | Item::Gap => 0,
+            Item::Mr { .. } | Item::Label(_) | Item::Gap => 0,
         });
         // Next to the longest branch when there is room, so a wide terminal
         // doesn't leave a gap to read across; else as far right as still
@@ -879,6 +878,11 @@ fn row(
     s: &Screen,
     out: &mut Vec<Line<'static>>,
 ) {
+    if let Item::Mr { iid, .. } = &r.item {
+        if let Some(mr) = s.snap.mr(*iid) {
+            return mr_box(r, mr, cols, on, s, out);
+        }
+    }
     let (glyph, glyph_fg, text, iid) = match &r.item {
         Item::Gap | Item::Label(_) => {
             let mut o = Out::default();
@@ -904,27 +908,7 @@ fn row(
             (glyph, color, name, mr.map_or(String::new(), bang))
         }
     };
-    // What is being done to it says so in place of its move, and what its
-    // landing waits on, under that; then an agent busy on it.
-    let (word, word_fg) = match &r.item {
-        Item::Mr { iid, mv, agent, .. } => match says(*mv, agent, s.doing.get(iid), s.landing.get(iid)) {
-            Says::Yours(w) => (w.to_string(), TEAL),
-            Says::Doing(w) => (format!("{w}…"), AMBER),
-            Says::Landing(w, ready) => (w.to_string(), if ready { TEAL } else { GREEN }),
-            Says::Working => (WORKING.to_string(), AMBER),
-            Says::Move(mv) => (mv.word(), word_color(mv)),
-        },
-        Item::Ticket { .. } => {
-            let (_, color, word) = ticket_move(&r.item);
-            (word, if color == FAINT { DIM } else { color })
-        }
-        Item::Claude { state, .. } => (state.word().to_string(), tone(state.tone())),
-        Item::Hc { status, .. } => {
-            let (_, word, color) = hc_look(*status);
-            (word.to_string(), color)
-        }
-        _ => (HERE.to_string(), DIM),
-    };
+    let (word, word_fg) = row_word(r, s);
     let room = cols
         .move_col
         .saturating_sub(2 + text_x(r))
@@ -957,17 +941,7 @@ fn row(
         if first {
             o.pad_to(cols.move_col.max(o.w + 2));
             o.put(&word, fg(word_fg));
-            let tour = match &r.item {
-                Item::Mr { iid, .. } => match s.tours.get(iid) {
-                    Some(Toured::Reading(0)) => Some(("touring…".to_string(), AMBER)),
-                    Some(Toured::Reading(n)) => Some((format!("touring {n}…"), AMBER)),
-                    Some(Toured::Ready) => Some(("◆ tour".to_string(), TEAL)),
-                    Some(Toured::Failed(_)) => Some(("no tour".to_string(), RED)),
-                    None => None,
-                },
-                _ => None,
-            };
-            if let Some((tag, color)) = tour {
+            if let Some((tag, color)) = tour_tag(r, s) {
                 o.pad_to(cols.right.saturating_sub(width(&iid) + width(&tag) + 2).max(o.w + 1));
                 o.put(&tag, fg(color));
             }
@@ -975,6 +949,125 @@ fn row(
             o.put(&iid, fg(DIM));
         }
         out.push(band(o.line(), on));
+    }
+}
+
+/// How an MR's tour is coming, beside its number.
+fn tour_tag(r: &Row, s: &Screen) -> Option<(String, Color)> {
+    let Item::Mr { iid, .. } = &r.item else { return None };
+    match s.tours.get(iid)? {
+        Toured::Reading(0) => Some(("touring…".to_string(), AMBER)),
+        Toured::Reading(n) => Some((format!("touring {n}…"), AMBER)),
+        Toured::Ready => Some(("◆ tour".to_string(), TEAL)),
+        Toured::Failed(_) => Some(("no tour".to_string(), RED)),
+    }
+}
+
+/// The narrowest a box's inside gets, however deep its stack.
+const MIN_BOX_W: usize = 16;
+/// Where boxes end on a wide terminal, so a box reads as one glance.
+const BOX_RIGHT: usize = 100;
+
+/// An MR as a box, as the agents window shows a thread, in three lines: its
+/// title in the top edge, then what waits on you and what the panel says of it.
+/// The rails it hangs from run down beside it, and its own stack hangs off its
+/// foot.
+fn mr_box(r: &Row, mr: &model::Mr, cols: &Cols, on: bool, s: &Screen, out: &mut Vec<Line<'static>>) {
+    let Item::Mr { iid, ticket, agent, .. } = &r.item else { return };
+    let n = r.wrap_rails.chars().count().saturating_sub(GLYPH_W);
+    let beside: String = r.wrap_rails.chars().take(n).collect();
+    let stacked = r.wrap_rails.ends_with("│ ");
+    let x = LEAD_W + width(&r.rails);
+    let inside = cols.right.min(BOX_RIGHT).saturating_sub(x + 4).max(MIN_BOX_W);
+    let edge = fg(if on { TEAL } else { FAINT });
+    let bg = if on { Style::new().bg(BAND) } else { Style::new() };
+    let p = model::panel(mr, s.snap, s.rules, agent.as_ref());
+    let handle = handle(*iid, ticket.as_deref());
+    let (word, word_fg) = row_word(r, s);
+    let (glyph, glyph_fg) = if word == WORKING {
+        ("◐", word_fg)
+    } else {
+        (p.mv.glyph(), tone(p.mv.tone()))
+    };
+
+    let mut o = Out::default();
+    lead(&mut o, on);
+    o.put(&r.rails, fg(FAINT));
+    o.put("╭ ", edge);
+    o.put(&format!("{glyph} "), bg.patch(fg(glyph_fg)));
+    let room = inside.saturating_sub(GLYPH_W + width(&handle) + 3);
+    let title = super::side::cut(&p.title, room);
+    o.put(&title, bg.patch(fg(TEXT).bold()));
+    o.put(" ", bg);
+    o.put(&"─".repeat(room.saturating_sub(width(&title)) + 1), edge);
+    o.put(" ", bg);
+    o.put(&handle, bg.patch(fg(DIM)));
+    o.put(" ╮", edge);
+    out.push(o.line());
+
+    // What the box leaves to the rails, its move and the panel: a parent the
+    // stack shows, threads the move counts, a pipeline that passed, how many files.
+    let facts: Vec<String> = p
+        .facts
+        .into_iter()
+        .filter(|f| {
+            f != "pipeline passed"
+                && !f.starts_with("on !")
+                && !f.starts_with('+')
+                && !(word.contains("thread") && f.contains(" open thread"))
+        })
+        .chain([model::size(mr.adds, mr.dels)])
+        .collect();
+    let tag = tour_tag(r, s).map(|(tag, color)| (format!(" · {tag}"), color));
+    let room = inside.saturating_sub(width(&word) + tag.as_ref().map_or(0, |(t, _)| width(t)));
+    let rest = super::side::cut(&format!(" · {}", facts.join(" · ")), room);
+    let mut o = Out::default();
+    lead(&mut o, false);
+    o.put(&beside, fg(FAINT));
+    o.put("│ ", edge);
+    let start = o.w;
+    o.put(&word, bg.patch(fg(word_fg)));
+    o.put(&rest, bg.patch(fg(DIM)));
+    if let Some((tag, color)) = &tag {
+        o.put(tag, bg.patch(fg(*color)));
+    }
+    if o.w < start + inside {
+        o.put(&" ".repeat(start + inside - o.w), bg);
+    }
+    o.put(" │", edge);
+    out.push(o.line());
+
+    let mut o = Out::default();
+    lead(&mut o, false);
+    o.put(&beside, fg(FAINT));
+    o.put(
+        &format!("{}{}╯", if stacked { "├" } else { "╰" }, "─".repeat(inside + 2)),
+        edge,
+    );
+    out.push(o.line());
+}
+
+/// What a row says at its right: what is being done to it in place of its
+/// move, and what its landing waits on, under that; then an agent busy on it.
+fn row_word(r: &Row, s: &Screen) -> (String, Color) {
+    match &r.item {
+        Item::Mr { iid, mv, agent, .. } => match says(*mv, agent, s.doing.get(iid), s.landing.get(iid)) {
+            Says::Yours(w) => (w.to_string(), TEAL),
+            Says::Doing(w) => (format!("{w}…"), AMBER),
+            Says::Landing(w, ready) => (w.to_string(), if ready { TEAL } else { GREEN }),
+            Says::Working => (WORKING.to_string(), AMBER),
+            Says::Move(mv) => (mv.word(), word_color(mv)),
+        },
+        Item::Ticket { .. } => {
+            let (_, color, word) = ticket_move(&r.item);
+            (word, if color == FAINT { DIM } else { color })
+        }
+        Item::Claude { state, .. } => (state.word().to_string(), tone(state.tone())),
+        Item::Hc { status, .. } => {
+            let (_, word, color) = hc_look(*status);
+            (word.to_string(), color)
+        }
+        _ => (HERE.to_string(), DIM),
     }
 }
 

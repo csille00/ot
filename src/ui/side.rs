@@ -105,7 +105,7 @@ fn entry(a: &Agent, s: &Side, w: usize) -> Vec<(String, Style)> {
 }
 
 /// `s` wrapped to `w` on at most two lines, the second cut short if it must be.
-fn two_lines(s: &str, w: usize) -> Vec<String> {
+pub(super) fn two_lines(s: &str, w: usize) -> Vec<String> {
     let mut parts = super::wrap(s, w);
     if parts.len() > 2 {
         let rest = parts[1..].join(" ");
@@ -120,7 +120,7 @@ fn pad(o: &mut Out, col: usize, style: Style) {
     }
 }
 
-fn cut(s: &str, w: usize) -> String {
+pub(super) fn cut(s: &str, w: usize) -> String {
     if width(s) <= w {
         return s.to_string();
     }
