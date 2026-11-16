@@ -94,6 +94,10 @@ pub enum Mode {
     Unpushed(Left),
     /// Its message as a new commit, being typed.
     Message(Left, String),
+    /// A TODO for today, being typed.
+    Todo(String),
+    /// A new note's title, being typed.
+    NoteTitle(String),
 }
 
 /// Your change in the review checkout, the MR of yours it goes to, and why
@@ -289,6 +293,9 @@ pub struct Screen<'a> {
     pub tours: &'a HashMap<u64, Toured>,
     /// This machine, as last read; drawn when the board has the room.
     pub stats: Option<&'a crate::stats::Stats>,
+    /// Where the keys are when they are off the board (your day at its right),
+    /// for the footer.
+    pub away: Option<&'a [Place]>,
 }
 
 /// Lower than this, the board keeps its rows for MRs, not the machine.
@@ -409,8 +416,13 @@ const HERE: &str = "you are here";
 /// What a row Claude is busy on says, in place of its move.
 const WORKING: &str = "Claude working…";
 
+#[cfg(test)]
 pub fn draw(f: &mut Frame, s: &Screen, v: &mut View) {
-    let area = f.area();
+    draw_in(f, f.area(), s, v);
+}
+
+/// The board in `area`, the rest of the screen left to what is beside it.
+pub fn draw_in(f: &mut Frame, area: ratatui::layout::Rect, s: &Screen, v: &mut View) {
     // Text stops a column short of the right edge; the left margin is in
     // each line's own lead.
     let right = (area.width as usize).saturating_sub(1);
@@ -567,6 +579,18 @@ fn asking(s: &Screen, v: &View, w: usize) -> Vec<Line<'static>> {
             lines.extend(typed(text, w));
             lines.push(Line::default());
             lines.push(key_line(&[("enter", " starts it  "), ("esc", " drops")]));
+        }
+        Mode::Todo(text) => {
+            lines.push(says("a TODO for today:".into(), DIM));
+            lines.extend(typed(text, w));
+            lines.push(Line::default());
+            lines.push(key_line(&[("enter", " adds it  "), ("esc", " drops")]));
+        }
+        Mode::NoteTitle(text) => {
+            lines.push(says("a new note, written in nvim. its title:".into(), DIM));
+            lines.extend(typed(text, w));
+            lines.push(Line::default());
+            lines.push(key_line(&[("enter", " writes it  "), ("esc", " drops")]));
         }
         Mode::Stop(to) => {
             lines.push(says(format!("stop {}? it presses the agent's stop key", to.name), AMBER));
@@ -1293,6 +1317,8 @@ fn footer(s: &Screen, v: &View, right: usize) -> Line<'static> {
         | Mode::Rename { .. }
         | Mode::Blurb { .. }
         | Mode::NewThread(_)
+        | Mode::Todo(_)
+        | Mode::NoteTitle(_)
         | Mode::Stop(_)
         | Mode::Unpushed(_)
         | Mode::Message(..) => {}
@@ -1329,7 +1355,8 @@ fn board_keys(o: &mut Out, s: &Screen, v: &View, right: usize) {
             .and_then(|m| model::move_of(m, &s.snap.me, s.rules).act()),
         _ => None,
     };
-    let mut ks: Vec<&keys::Key> = keys::footer(&v.places(s.snap, s.board)).collect();
+    let places = s.away.map(<[Place]>::to_vec).unwrap_or_else(|| v.places(s.snap, s.board));
+    let mut ks: Vec<&keys::Key> = keys::footer(&places).collect();
     ks.sort_by_key(|k| {
         (
             k.key != "enter",
@@ -1406,6 +1433,7 @@ mod tests {
             hills: &Hills::default(),
             tours: &HashMap::new(),
             stats: None,
+            away: None,
         };
         t.draw(|f| draw(f, &s, &mut v)).unwrap();
         crate::ui::text(&t)
