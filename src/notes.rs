@@ -159,8 +159,11 @@ impl Day {
     /// Checks the `i`th box shown, or unchecks it.
     pub fn toggle(&mut self, i: usize) -> Result<(), String> {
         let Some(t) = self.shown().get(i).map(|t| (*t).clone()) else { return Ok(()) };
+        let same = |n: &Todo| n.text == t.text && n.done == t.done;
+        // Which of the boxes that read the same it is, as two can.
+        let nth = self.shown()[..i].iter().filter(|n| same(n)).count();
         self.fresh();
-        let Some(t) = self.todos.iter().find(|n| n.text == t.text && n.done == t.done).cloned() else { return Ok(()) };
+        let Some(t) = self.shown().into_iter().filter(|n| same(n)).nth(nth).cloned() else { return Ok(()) };
         let l = &mut self.lines[t.line];
         // The box is the first on the line; any after it are the TODO's words.
         let (from, to) = if t.done { (["[x]", "[X]"], "[ ]") } else { (["[ ]", "[ ]"], "[x]") };
@@ -335,6 +338,10 @@ mod tests {
         d.toggle(1).unwrap();
         assert!(d.todos.iter().all(|t| !t.done));
         // Only the box turns, not one in its words; and an edit saved since is kept.
+        fs::write(&d.path, "- [ ] standup\n- [ ] standup\n").unwrap();
+        d = Day::read(&r, date("2026-11-15"));
+        d.toggle(1).unwrap();
+        assert_eq!(fs::read_to_string(&d.path).unwrap(), "- [ ] standup\n- [x] standup\n");
         fs::write(&d.path, "- [x] investigate [X] and [ ]\n").unwrap();
         d.add("then this").unwrap();
         assert_eq!(fs::read_to_string(&d.path).unwrap(), "- [x] investigate [X] and [ ]\n- [ ] then this\n");
