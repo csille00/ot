@@ -1696,6 +1696,10 @@ fn review_in_nvim(
 /// text, else as the act the key is there (keys.rs).
 fn key(app: &mut App, name: &str) -> Next {
     app.note = None;
+    // Your day gone from the screen (too narrow now) gives the keys back.
+    if !app.day_shows(app.width) {
+        app.day_view.focus = None;
+    }
     if let Shown::Music(view) = &mut app.shown {
         view.said = None;
     }
