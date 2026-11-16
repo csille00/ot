@@ -321,10 +321,12 @@ mod tests {
         assert!(d.todos.iter().all(|t| !t.done));
         // Only the box turns, not one in its words; and an edit saved since is kept.
         fs::write(&d.path, "- [x] investigate [X] and [ ]\n").unwrap();
+        d.add("then this").unwrap();
+        assert_eq!(fs::read_to_string(&d.path).unwrap(), "- [x] investigate [X] and [ ]\n- [ ] then this\n");
+        d.toggle(1).unwrap();
+        assert_eq!(fs::read_to_string(&d.path).unwrap(), "- [ ] investigate [X] and [ ]\n- [ ] then this\n");
         d.toggle(0).unwrap();
-        assert_eq!(fs::read_to_string(&d.path).unwrap(), "- [ ] investigate [X] and [ ]\n");
-        d.toggle(0).unwrap();
-        assert_eq!(fs::read_to_string(&d.path).unwrap(), "- [x] investigate [X] and [ ]\n");
+        assert_eq!(fs::read_to_string(&d.path).unwrap(), "- [x] investigate [X] and [ ]\n- [ ] then this\n");
     }
 
     #[test]
