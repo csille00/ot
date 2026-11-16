@@ -119,11 +119,20 @@ impl Day {
         v
     }
 
+    /// The list as its file says now, so a write keeps what nvim or anything
+    /// else saved since ot read it.
+    fn fresh(&mut self) {
+        if let (Some(date), Ok(text)) = (self.date, fs::read_to_string(&self.path)) {
+            *self = Day::of(self.path.clone(), date, &text);
+        }
+    }
+
     pub fn add(&mut self, text: &str) -> Result<(), String> {
         let text = text.trim();
         if text.is_empty() {
             return Ok(());
         }
+        self.fresh();
         if self.lines.is_empty() {
             if let Some(d) = self.date {
                 self.lines = heading(d);
@@ -140,6 +149,8 @@ impl Day {
     /// Checks the `i`th box shown, or unchecks it.
     pub fn toggle(&mut self, i: usize) -> Result<(), String> {
         let Some(t) = self.shown().get(i).map(|t| (*t).clone()) else { return Ok(()) };
+        self.fresh();
+        let Some(t) = self.todos.iter().find(|n| n.text == t.text && n.done == t.done).cloned() else { return Ok(()) };
         let l = &mut self.lines[t.line];
         *l = if t.done {
             l.replacen("[x]", "[ ]", 1).replacen("[X]", "[ ]", 1)
