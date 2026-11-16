@@ -1,32 +1,31 @@
 ---
 source: src/ui/board.rs
-assertion_line: 1294
 expression: "frame(100, 30, |_, v|\n{\n    v.mode = Mode::Rebase\n    {\n        iid: 102, ready: Rebased\n        {\n            layers: vec![], said:\n            [(false, \"!102  Change 102\"),\n            (true, \"2 commits onto main, 5 new there\"),\n            (true,\n            \"Claude settled abc1234 in parser.ts: kept main's new error type and raised the parser's errors as it\"),\n            (false,\n            \"it is pushed with a new pipeline; your branch here follows\"),].map(|(detail,\n            text)| Said { detail, text: text.into() }).into(), question:\n            \"rebase it?\".into(), left_out: None, settled: 0, changed: vec![],\n        },\n    }\n})"
 ---
  ot  team/app                                                                           as of 13:44
 
    main
     │
-  ▌ ├─ ● parser-cleanup                                                      rebase it         !101
-    │  └─ ● parser-errors                                                    rebasing…         !102
-    │     └─ · parser-ab                                                     draft             !103
-    ├─ ● c╭──────────────────────────────────────────────────────────────────────────────╮e    !104
-    ├─ ● r│ !102  Change 102                                                             │     !105
-    ├─ ● a│   2 commits onto main, 5 new there                                           │ads  !106
-    ├─ ◐ w│   Claude settled abc1234 in parser.ts: kept main's new error type and        │     !107
-    ├─ ○ q│   raised the parser's errors as it                                           │     !108
-    ├─ ◐ l│ it is pushed with a new pipeline; your branch here follows                   │     !109
-    │     │                                                                              │
-    │  ale│ rebase it?                                                                   │
-    ├─ ● a│                                                                              │     !201
-    │     │ y yes  esc later  n drop it                                                  │
-    │  kim╰──────────────────────────────────────────────────────────────────────────────╯
-    ├─ ✓ kim/flag-cleanup                                                    you approved      !202
-    │  └─ ● kim/flag-cleanup-two                                             review it         !203
-    │
-    └─ ◆ sam/scratch                                                         you are here
-
-   claude
+    ├─ ╭──────────────────────────────────────────────────────────────────────────────────────────╮
+  ▌ │  │ ● Split the parser's error paths from its happy path so each reads alone            !101 │
+    │  │   rebase it · parser-cleanup · 1d                                                        │
+    │  │  ╭──────────────────────────────────────────────────────────────────────────────╮83 −72  │
+    │  │  │ !102  Change 102                                                             │        │
+    │  ├──│   2 commits onto main, 5 new there                                           │────────╯
+    │  └─ │   Claude settled abc1234 in parser.ts: kept main's new error type and        │────────╮
+    │     │   raised the parser's errors as it                                           │   !102 │
+    │     │ it is pushed with a new pipeline; your branch here follows                   │        │
+    │     │                                                                              │        │
+    │     │ rebase it?                                                                   │────────╯
+    │     │                                                                              │────────╮
+    │     │ y yes  esc later  n drop it                                                  │   !103 │
+    │     ╰──────────────────────────────────────────────────────────────────────────────╯        │
+    │        │   pipeline passed · waiting on kim · on !102 · +12 −3 in 2 files                   │
+    │        ╰────────────────────────────────────────────────────────────────────────────────────╯
+    ├─ ╭──────────────────────────────────────────────────────────────────────────────────────────╮
+    │  │ ● Change 104                                                                        !104 │
+    │  │   pipeline broke · cache-keys · 1d                                                       │
+    │  │   unit-tests, lint failed · waiting on kim · +12 −3 in 2 files                           │
  ──────────────────────────────────────────────────────────────────────────────────────────────────
   Split the parser's error paths from its happy path so each reads alone                       !101
   ● rebase it  ·  split from main 6 days ago  ·  stale-check failed  ·  nobody asked to review
