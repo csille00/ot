@@ -152,11 +152,11 @@ impl Day {
         self.fresh();
         let Some(t) = self.todos.iter().find(|n| n.text == t.text && n.done == t.done).cloned() else { return Ok(()) };
         let l = &mut self.lines[t.line];
-        *l = if t.done {
-            l.replacen("[x]", "[ ]", 1).replacen("[X]", "[ ]", 1)
-        } else {
-            l.replacen("[ ]", "[x]", 1)
-        };
+        // The box is the first on the line; any after it are the TODO's words.
+        let (from, to) = if t.done { (["[x]", "[X]"], "[ ]") } else { (["[ ]", "[ ]"], "[x]") };
+        if let Some(at) = from.iter().filter_map(|m| l.find(m)).min() {
+            l.replace_range(at..at + 3, to);
+        }
         self.save()?;
         *self = Day::of(self.path.clone(), self.date.unwrap(), &self.lines.join("\n"));
         Ok(())
@@ -319,6 +319,12 @@ mod tests {
         );
         d.toggle(1).unwrap();
         assert!(d.todos.iter().all(|t| !t.done));
+        // Only the box turns, not one in its words; and an edit saved since is kept.
+        fs::write(&d.path, "- [x] investigate [X] and [ ]\n").unwrap();
+        d.toggle(0).unwrap();
+        assert_eq!(fs::read_to_string(&d.path).unwrap(), "- [ ] investigate [X] and [ ]\n");
+        d.toggle(0).unwrap();
+        assert_eq!(fs::read_to_string(&d.path).unwrap(), "- [x] investigate [X] and [ ]\n");
     }
 
     #[test]
