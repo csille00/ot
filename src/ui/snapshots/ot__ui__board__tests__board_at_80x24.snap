@@ -6,20 +6,20 @@ expression: "frame(80, 24, |_, _| {})"
 
    main
     │
-    ├─ ╭──────────────────────────────────────────────────────────────────────╮
-  ▌ │  │ ● Split the parser's error paths from its happy path so each    !101 │
-    │  │   reads alone                                                        │
-    │  │   rebase it · parser-cleanup · 1d                                    │
-    │  │   split from main 6 days ago · stale-check failed · nobody asked to  │
-    │  │   review · +1,083 −72 in 12 files                                    │
+  ▌ ├─ ╭ ● Split the parser's error paths from its happy path so each… ─ !101 ╮
+    │  │ rebase it · split from main 6 days ago · stale-check failed · nobod… │
     │  ├──────────────────────────────────────────────────────────────────────╯
-    │  └─ ╭───────────────────────────────────────────────────────────────────╮
-    │     │ ● Change 102                                                 !102 │
-    │     │   rebasing… · parser-errors · 1d                                  │
-    │     │   pipeline passed · nobody asked to review · on !101 · +12 −3 in  │
-    │     │   2 files                                                         │
+    │  └─ ╭ ● Change 102 ─────────────────────────────────────────────── !102 ╮
+    │     │ rebasing… · nobody asked to review · +12 −3                       │
     │     ├───────────────────────────────────────────────────────────────────╯
-    │     └─ ╭────────────────────────────────────────────────────────────────╮
+    │     └─ ╭ · Change 103 ──────────────────────────────────────────── !103 ╮
+    │        │ draft · waiting on kim · +12 −3                                │
+    │        ╰────────────────────────────────────────────────────────────────╯
+    ├─ ╭ ● Change 104 ────────────────────────────────────────────────── !104 ╮
+    │  │ pipeline broke · unit-tests, lint failed · waiting on kim · +12 −3   │
+    │  ╰──────────────────────────────────────────────────────────────────────╯
+    ├─ ╭ ● Change 105 ────────────────────────────────────────────────── !105 ╮
+    │  │ merge it · approved by kim · +12 −3                                  │
  ──────────────────────────────────────────────────────────────────────────────
   Split the parser's error paths from its happy path so each reads alone   !101
   ● rebase it  ·  split from main 6 days ago  ·  stale-check failed

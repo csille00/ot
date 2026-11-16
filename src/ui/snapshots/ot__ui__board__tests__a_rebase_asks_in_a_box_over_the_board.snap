@@ -6,26 +6,26 @@ expression: "frame(100, 30, |_, v|\n{\n    v.mode = Mode::Rebase\n    {\n       
 
    main
     │
-    ├─ ╭──────────────────────────────────────────────────────────────────────────────────────────╮
-  ▌ │  │ ● Split the parser's error paths from its happy path so each reads alone            !101 │
-    │  │   rebase it · parser-cleanup · 1d                                                        │
-    │  │  ╭──────────────────────────────────────────────────────────────────────────────╮83 −72  │
-    │  │  │ !102  Change 102                                                             │        │
-    │  ├──│   2 commits onto main, 5 new there                                           │────────╯
-    │  └─ │   Claude settled abc1234 in parser.ts: kept main's new error type and        │────────╮
-    │     │   raised the parser's errors as it                                           │   !102 │
-    │     │ it is pushed with a new pipeline; your branch here follows                   │        │
-    │     │                                                                              │        │
-    │     │ rebase it?                                                                   │────────╯
-    │     │                                                                              │────────╮
-    │     │ y yes  esc later  n drop it                                                  │   !103 │
-    │     ╰──────────────────────────────────────────────────────────────────────────────╯        │
-    │        │   pipeline passed · waiting on kim · on !102 · +12 −3 in 2 files                   │
-    │        ╰────────────────────────────────────────────────────────────────────────────────────╯
-    ├─ ╭──────────────────────────────────────────────────────────────────────────────────────────╮
-    │  │ ● Change 104                                                                        !104 │
-    │  │   pipeline broke · cache-keys · 1d                                                       │
-    │  │   unit-tests, lint failed · waiting on kim · +12 −3 in 2 files                           │
+  ▌ ├─ ╭ ● Split the parser's error paths from its happy path so each reads alone ────────── !101 ╮
+    │  │ rebase it · split from main 6 days ago · stale-check failed · nobody asked to review · … │
+    │  ├──────────────────────────────────────────────────────────────────────────────────────────╯
+    │  └─ ╭──────────────────────────────────────────────────────────────────────────────╮── !102 ╮
+    │     │ !102  Change 102                                                             │        │
+    │     │   2 commits onto main, 5 new there                                           │────────╯
+    │     │   Claude settled abc1234 in parser.ts: kept main's new error type and        │── !103 ╮
+    │     │   raised the parser's errors as it                                           │        │
+    │     │ it is pushed with a new pipeline; your branch here follows                   │────────╯
+    ├─ ╭ ●│                                                                              │── !104 ╮
+    │  │ p│ rebase it?                                                                   │        │
+    │  ╰──│                                                                              │────────╯
+    ├─ ╭ ●│ y yes  esc later  n drop it                                                  │── !105 ╮
+    │  │ m╰──────────────────────────────────────────────────────────────────────────────╯        │
+    │  ╰──────────────────────────────────────────────────────────────────────────────────────────╯
+    ├─ ╭ ● Change 106 ────────────────────────────────────────────────────────────────────── !106 ╮
+    │  │ answer 3 threads · waiting on kim · +12 −3                                               │
+    │  ╰──────────────────────────────────────────────────────────────────────────────────────────╯
+    ├─ ╭ ◐ Change 107 ────────────────────────────────────────────────────────────────────── !107 ╮
+    │  │ running · pipeline running · waiting on kim · +12 −3                                     │
  ──────────────────────────────────────────────────────────────────────────────────────────────────
   Split the parser's error paths from its happy path so each reads alone                       !101
   ● rebase it  ·  split from main 6 days ago  ·  stale-check failed  ·  nobody asked to review

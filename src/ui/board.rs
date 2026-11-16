@@ -968,11 +968,12 @@ const MIN_BOX_W: usize = 16;
 /// Where boxes end on a wide terminal, so a box reads as one glance.
 const BOX_RIGHT: usize = 100;
 
-/// An MR as a box, as the agents window shows a thread: its title, what it waits
-/// on and its branch, then what the panel says of it. The rails it hangs from run
-/// down beside it, and its own stack hangs off its foot.
+/// An MR as a box, as the agents window shows a thread, in three lines: its
+/// title in the top edge, then what waits on you and what the panel says of it.
+/// The rails it hangs from run down beside it, and its own stack hangs off its
+/// foot.
 fn mr_box(r: &Row, mr: &model::Mr, cols: &Cols, on: bool, s: &Screen, out: &mut Vec<Line<'static>>) {
-    let Item::Mr { iid, branch, ticket, agent, .. } = &r.item else { return };
+    let Item::Mr { iid, ticket, agent, .. } = &r.item else { return };
     let n = r.wrap_rails.chars().count().saturating_sub(GLYPH_W);
     let beside: String = r.wrap_rails.chars().take(n).collect();
     let stacked = r.wrap_rails.ends_with("│ ");
@@ -980,57 +981,70 @@ fn mr_box(r: &Row, mr: &model::Mr, cols: &Cols, on: bool, s: &Screen, out: &mut 
     let inside = cols.right.min(BOX_RIGHT).saturating_sub(x + 4).max(MIN_BOX_W);
     let edge = fg(if on { TEAL } else { FAINT });
     let bg = if on { Style::new().bg(BAND) } else { Style::new() };
-    let rim = |left: &str, corner: &str, right: &str| {
-        let mut o = Out::default();
-        lead(&mut o, false);
-        o.put(left, fg(FAINT));
-        o.put(&format!("{corner}{}{right}", "─".repeat(inside + 2)), edge);
-        o.line()
-    };
-    let inner = |parts: &[(String, Style)], marked: bool| {
-        let mut o = Out::default();
-        lead(&mut o, marked);
-        o.put(&beside, fg(FAINT));
-        o.put("│ ", edge);
-        let start = o.w;
-        for (text, style) in parts {
-            o.put(text, bg.patch(*style));
-        }
-        if o.w < start + inside {
-            o.put(&" ".repeat(start + inside - o.w), bg);
-        }
-        o.put(" │", edge);
-        o.line()
-    };
     let p = model::panel(mr, s.snap, s.rules, agent.as_ref());
     let handle = handle(*iid, ticket.as_deref());
-    let (glyph, glyph_fg) = match row_word(r, s) {
-        (w, c) if w == WORKING => ("◐", c),
-        _ => (p.mv.glyph(), tone(p.mv.tone())),
-    };
-    out.push(rim(&r.rails, "╭", "╮"));
-    let title = fg(TEXT).bold();
-    for (i, line) in super::side::two_lines(&p.title, inside.saturating_sub(GLYPH_W + width(&handle) + 2)).into_iter().enumerate() {
-        let mut parts = vec![(if i == 0 { format!("{glyph} ") } else { "  ".into() }, fg(glyph_fg)), (line, title)];
-        if i == 0 {
-            let used: usize = parts.iter().map(|(t, _)| width(t)).sum();
-            parts.push((" ".repeat(inside.saturating_sub(used + width(&handle))), Style::new()));
-            parts.push((handle.clone(), fg(DIM)));
-        }
-        out.push(inner(&parts, on && i == 0));
-    }
     let (word, word_fg) = row_word(r, s);
-    let mut says = vec![(word.clone(), fg(word_fg))];
-    let tag = tour_tag(r, s).map(|(tag, color)| (format!(" · {tag}"), fg(color)));
-    let rest = format!(" · {branch} · {}", model::ago(s.now - mr.updated));
-    let room = inside.saturating_sub(GLYPH_W + width(&word) + tag.as_ref().map_or(0, |(t, _)| width(t)));
-    says.push((super::side::cut(&rest, room), fg(DIM)));
-    says.extend(tag);
-    out.push(inner(&[("  ".into(), Style::new())].into_iter().chain(says).collect::<Vec<_>>(), false));
-    for line in super::side::two_lines(&p.facts.join(" · "), inside.saturating_sub(GLYPH_W)) {
-        out.push(inner(&[("  ".into(), Style::new()), (line, fg(DIM))], false));
+    let (glyph, glyph_fg) = if word == WORKING {
+        ("◐", word_fg)
+    } else {
+        (p.mv.glyph(), tone(p.mv.tone()))
+    };
+
+    let mut o = Out::default();
+    lead(&mut o, on);
+    o.put(&r.rails, fg(FAINT));
+    o.put("╭ ", edge);
+    o.put(&format!("{glyph} "), bg.patch(fg(glyph_fg)));
+    let room = inside.saturating_sub(GLYPH_W + width(&handle) + 3);
+    let title = super::side::cut(&p.title, room);
+    o.put(&title, bg.patch(fg(TEXT).bold()));
+    o.put(" ", bg);
+    o.put(&"─".repeat(room.saturating_sub(width(&title)) + 1), edge);
+    o.put(" ", bg);
+    o.put(&handle, bg.patch(fg(DIM)));
+    o.put(" ╮", edge);
+    out.push(o.line());
+
+    // What the box leaves to the rails, its move and the panel: a parent the
+    // stack shows, threads the move counts, a pipeline that passed, how many files.
+    let facts: Vec<String> = p
+        .facts
+        .into_iter()
+        .filter(|f| {
+            f != "pipeline passed"
+                && !f.starts_with("on !")
+                && !f.starts_with('+')
+                && !(word.contains("thread") && f.contains(" open thread"))
+        })
+        .chain([model::size(mr.adds, mr.dels)])
+        .collect();
+    let tag = tour_tag(r, s).map(|(tag, color)| (format!(" · {tag}"), color));
+    let room = inside.saturating_sub(width(&word) + tag.as_ref().map_or(0, |(t, _)| width(t)));
+    let rest = super::side::cut(&format!(" · {}", facts.join(" · ")), room);
+    let mut o = Out::default();
+    lead(&mut o, false);
+    o.put(&beside, fg(FAINT));
+    o.put("│ ", edge);
+    let start = o.w;
+    o.put(&word, bg.patch(fg(word_fg)));
+    o.put(&rest, bg.patch(fg(DIM)));
+    if let Some((tag, color)) = &tag {
+        o.put(tag, bg.patch(fg(*color)));
     }
-    out.push(rim(&beside, if stacked { "├" } else { "╰" }, "╯"));
+    if o.w < start + inside {
+        o.put(&" ".repeat(start + inside - o.w), bg);
+    }
+    o.put(" │", edge);
+    out.push(o.line());
+
+    let mut o = Out::default();
+    lead(&mut o, false);
+    o.put(&beside, fg(FAINT));
+    o.put(
+        &format!("{}{}╯", if stacked { "├" } else { "╰" }, "─".repeat(inside + 2)),
+        edge,
+    );
+    out.push(o.line());
 }
 
 /// What a row says at its right: what is being done to it in place of its

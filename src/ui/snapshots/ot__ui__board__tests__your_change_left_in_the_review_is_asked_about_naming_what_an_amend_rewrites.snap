@@ -6,20 +6,20 @@ expression: "frame(80, 24, |_, v|\n{\n    v.mode =\n    Mode::Unpushed(Left\n   
 
    main
     │
-    ├─ ╭──────────────────────────────────────────────────────────────────────╮
-  ▌ │  │ ● Split the parser's error paths from its happy path so each    !101 │
-    ╭──────────────────────────────────────────────────────────────────────╮  │
-    │ GitLab's sam/sum had moved on to 9f8e7d6 "theirs", so nothing was    │  │
+  ▌ ├─ ╭ ● Split the parser's error paths from its happy path so each… ─ !101 ╮
+    │  │ rebase it · split from main 6 days ago · stale-check failed · nobod… │
+    ╭──────────────────────────────────────────────────────────────────────╮──╯
+    │ GitLab's sam/sum had moved on to 9f8e7d6 "theirs", so nothing was    │2 ╮
     │ pushed; your change is on it now, for you to look at before it goes  │  │
-    │                                                                      │  │
-    │ your change to !102 isn't pushed:                                    │──╯
-    │ src/sum.ts, src/total.ts                                             │──╮
-    │ on 1a2b3c4 "Sum with reduce"                                         │2 │
-    │                                                                      │  │
+    │                                                                      │──╯
+    │ your change to !102 isn't pushed:                                    │3 ╮
+    │ src/sum.ts, src/total.ts                                             │  │
+    │ on 1a2b3c4 "Sum with reduce"                                         │──╯
+    │                                                                      │4 ╮
     │ a amend that  c new commit  d put aside  esc keep it there           │  │
-    ╰──────────────────────────────────────────────────────────────────────╯  │
-    │     ├───────────────────────────────────────────────────────────────────╯
-    │     └─ ╭────────────────────────────────────────────────────────────────╮
+    ╰──────────────────────────────────────────────────────────────────────╯──╯
+    ├─ ╭ ● Change 105 ────────────────────────────────────────────────── !105 ╮
+    │  │ merge it · approved by kim · +12 −3                                  │
  ──────────────────────────────────────────────────────────────────────────────
   Split the parser's error paths from its happy path so each reads alone   !101
   ● rebase it  ·  split from main 6 days ago  ·  stale-check failed
